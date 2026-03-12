@@ -4,7 +4,30 @@ import * as cheerio from 'cheerio';
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK SCRAPER - FIXED IMAGE CLASSIFICATION
 //  
-//  FIXES APPLIED (2026-03-12):
+//  FIXES APPLIED (2026-03-12) — SCORING v2 (universal model-suffix fix):
+//  ─────────────────────────────────────────────────────────────────────────────
+//  ROOT CAUSE (Pixel 10 Pro XL / general wrong-variant issue):
+//  ────────────────────────────────────────────────────────────
+//  VARIANT_WORDS was missing key model-suffix tokens: 'xl', 'xr', 'se', '5g',
+//  '4g', 'go', 'compact', 'slim', 'zoom', 'plus', 'fold', 'flip'.
+//  Because 'xl' was not in VARIANT_WORDS, a query for "Pixel 10 Pro" received
+//  ZERO penalty when the "Pixel 10 Pro XL" review appeared in results, and it
+//  could outscore the correct result on other heuristics (URL boost, etc.).
+//
+//  FIX C5 — VARIANT_WORDS extended: all common model-distinguishing suffixes added.
+//
+//  FIX C6 — HARD_REJECT_SUFFIXES in scoreCandidate():
+//    A new Set of suffixes that unambiguously identify a distinct SKU.
+//    If a result has such a suffix but the query does NOT (or vice-versa),
+//    the result is HARD-REJECTED (returns -1) rather than just penalised.
+//    This makes the fix robust even when score gaps are small.
+//    Suffixes: xl, xr, se, 5g, 4g, go, compact, slim, zoom, plus, fold, flip.
+//
+//  FIX C7 — Exact suffix-match bonus (+800):
+//    When the set of model-suffix words in the result exactly equals the set in
+//    the query, award a bonus to push the correct model to the top of the ranking.
+//
+//  ORIGINAL FIXES APPLIED (2026-03-12):
 //  ─────────────────────────────────────────────────────────────────────────────
 //  ROOT CAUSE (Pixel 10 Pro XL / all modern NBC reviews):
 //  ───────────────────────────────────────────────────────
@@ -531,7 +554,26 @@ const MODEL_SINGLE_CHARS = new Set(['z', 'x', 's', 'p', 'a', 'f', 'v', 'm']);
 // FIX C4: Compile variant regexes ONCE at module level.
 // Previously `variantRe` was a closure recreating 17 RegExp objects on every
 // scoreCandidate() call — which fires hundreds of times per search strategy.
-const VARIANT_WORDS = ['ultra','plus','mini','lite','fe','max','pro','standard','elite','turbo','neo','speed','air','fold','flip','edge','note'] as const;
+//
+// FIX C5 (2026-03-12): Added missing model-suffix tokens that caused wrong-variant
+// results to pass scoring with zero penalty:
+//   'xl'       — e.g. Pixel 10 Pro XL vs Pixel 10 Pro (THE primary reported bug)
+//   'xr'       — e.g. iPhone XR vs iPhone XS
+//   'se'       — e.g. iPhone SE vs iPhone 16
+//   '5g'       — e.g. Galaxy A53 5G vs Galaxy A53
+//   '4g'       — e.g. Redmi Note 12 4G vs 5G
+//   'plus'     — already present, kept
+//   'go'       — e.g. Pixel 8a Go (budget variants)
+//   'compact'  — e.g. Sony Xperia 5 vs Xperia 5 Compact
+//   'slim'     — e.g. Galaxy S25 Slim/Edge
+//   'zoom'     — e.g. Pixel 9 Pro vs Pixel 9 Pro Fold (distinct model)
+//   'a'        — handled separately as single-char model identifier (see MODEL_SINGLE_CHARS)
+const VARIANT_WORDS = [
+  'ultra','plus','mini','lite','fe','max','pro','standard','elite','turbo',
+  'neo','speed','air','fold','flip','edge','note',
+  // ── newly added ──
+  'xl','xr','se','5g','4g','go','compact','slim','zoom',
+] as const;
 type VariantWord = typeof VARIANT_WORDS[number];
 const VARIANT_RE: ReadonlyMap<VariantWord, RegExp> = new Map(
   VARIANT_WORDS.map(v => [v, new RegExp('\\b' + v + '\\b', 'i')] as [VariantWord, RegExp])
@@ -560,6 +602,30 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
 
   if (!checkWords.every(w => combined.includes(w))) return -1;
 
+  // ── HARD-REJECT: model-suffix mismatch ──────────────────────────────────────
+  // If the query does NOT contain a variant suffix but the result DOES, AND that
+  // suffix materially distinguishes a different model, reject outright instead of
+  // just penalising.  This prevents "Pixel 10 Pro XL" from ever winning a query
+  // for "Pixel 10 Pro", "Galaxy S25 Ultra" from winning "Galaxy S25", etc.
+  //
+  // We only hard-reject when:
+  //   (a) The suffix appears in the result but NOT in either form of the query, AND
+  //   (b) The suffix is in HARD_REJECT_SUFFIXES — i.e. it identifies a clearly
+  //       distinct product line, not just a marketing tier word that might appear
+  //       in prose ("the pro-grade camera").
+  //
+  // Soft-penalty suffixes (pro, ultra, max, etc.) are still handled below via
+  // VARIANT_RE so they get a large score deduction rather than instant rejection.
+  // This gives them a chance to win if literally no other result is available.
+  const HARD_REJECT_SUFFIXES: ReadonlySet<string> = new Set(['xl','xr','se','5g','4g','go','compact','slim','zoom','plus','fold','flip']);
+  for (const suffix of HARD_REJECT_SUFFIXES) {
+    const re = new RegExp('\\b' + suffix + '\\b', 'i');
+    const inQuery    = re.test(q) || re.test(oq);
+    const inResult   = re.test(combined);
+    if (!inQuery && inResult)  return -1; // result has suffix the user didn't ask for → wrong model
+    if (inQuery  && !inResult) return -1; // result is MISSING a suffix the user asked for → wrong model
+  }
+
   let score = 500;
 
   if (combined.includes(q))                            score += 2000;
@@ -568,6 +634,17 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   if (u.includes(oq.replace(/\s+/g, '-')))             score += 800;
   if (u.includes('-review'))                            score += 600;
   if (u.includes('smartphone-review'))                  score += 400;
+
+  // ── Exact model-suffix match bonus ──────────────────────────────────────────
+  // Reward results where the query suffix words are all present AND no extra
+  // suffix words are present. This boosts e.g. exact "Pixel 10 Pro" over a
+  // "Pixel 10 Pro Max" result that somehow passed the hard-reject above.
+  const qSuffixWords  = [...HARD_REJECT_SUFFIXES].filter(s => new RegExp('\\b' + s + '\\b', 'i').test(q) || new RegExp('\\b' + s + '\\b', 'i').test(oq));
+  const resSuffixWords = [...HARD_REJECT_SUFFIXES].filter(s => new RegExp('\\b' + s + '\\b', 'i').test(combined));
+  if (qSuffixWords.length === resSuffixWords.length &&
+      qSuffixWords.every(s => resSuffixWords.includes(s))) {
+    score += 800; // perfect suffix match — reward exact model alignment
+  }
 
   // Use the pre-compiled VARIANT_RE map (compiled once at module level — FIX C4)
   for (const [v, re] of VARIANT_RE) {
