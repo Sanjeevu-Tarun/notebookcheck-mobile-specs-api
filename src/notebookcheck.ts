@@ -3,7 +3,33 @@ import * as cheerio from 'cheerio';
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK SCRAPER - FIXED IMAGE CLASSIFICATION
-//  
+//
+//  FIX 7 — aPic_ image misclassification (2026-03-12):
+//  ─────────────────────────────────────────────────────────────────────────────
+//  ROOT CAUSE (Vivo X300 Pro / any review where NBC photographer uses aPic_ naming):
+//  ──────────────────────────────────────────────────────────────────────────────
+//  `aPic_` is NBC's review-photographer naming for ALL photos in a review, including:
+//    • The hero/header device shot at the article top (e.g. aPic_Vivo_X300_Pro-0002.jpg)
+//    • Case/housing section device shots    (e.g. aPic_Vivo_X300_Pro-1769.jpg)
+//    • Connectivity angle shots with "Top:", "Left:" captions (correctly → deviceAngles)
+//    • Actual camera samples in the Camera section
+//  The previous rule `if (/^apic_/i.test(filename)) return 'cameraSamples'` was a
+//  blanket match that routed ALL aPic_ files to cameraSamples, leaving device = [] and
+//  stuffing the hero + hardware shots into the wrong bucket.
+//
+//  FIX 7a — classifyByFilename(): aPic_ now defaults to 'device' (not 'cameraSamples').
+//    True camera samples with aPic_ naming always have informative captions
+//    ("1x", "Night mode", "Selfie", etc.) → classifyByCaption handles them first.
+//    The camera-section override in sectionBucketOverride catches the rest.
+//
+//  FIX 7b — sectionBucketOverride():
+//    • Case/housing section + aPic_ → 'device'  (hero + case hardware shots)
+//    • Camera/photo section + aPic_ → 'cameraSamples'  (safety net for captionless samples)
+//
+//  FIX 7c — hasClearFilename gate (Pass 2):
+//    Added aPic_ to the list of filename patterns that pass the csm_ gate,
+//    so csm_aPic_* thumbnails in the Case section aren't silently dropped.
+//
 //  FIXES APPLIED (2026-03-12) — SCORING v2 (universal model-suffix fix):
 //  ─────────────────────────────────────────────────────────────────────────────
 //  ROOT CAUSE (Pixel 10 Pro XL / general wrong-variant issue):
@@ -1859,9 +1885,13 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     if (/^img_?\d+/i.test(filename)) return 'cameraSamples';
     if (/^dsc_?\d+/i.test(filename)) return 'cameraSamples';
     if (/^dcim/i.test(filename)) return 'cameraSamples';
-    // aPic_ = NBC's naming for actual camera shot photos — caught by universal default below,
-    // but listed explicitly for clarity and defence-in-depth.
-    if (/^apic_/i.test(filename)) return 'cameraSamples';
+    // aPic_ = NBC review-photographer naming for photos in the article (shots OF the device,
+    // OR shots taken BY the device in the Camera section).
+    // Default → 'device' because the most common use is hero + case/housing shots.
+    // classifyByCaption (runs before filename) catches camera samples that have
+    // informative captions ("1x", "Night mode", etc.).
+    // sectionBucketOverride catches aPic_ inside the Camera section (see FIX 7b).
+    if (/^apic_/i.test(filename)) return 'device';
     // Portrait Studio shots are photos taken BY the phone, not product shots of the device.
     // e.g. Portrait_Studio_Samsung_Galaxy_S25_Ultra_4.jpg
     if (/^portrait[_\-]studio/i.test(filename)) return 'cameraSamples';
@@ -2179,12 +2209,23 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     const f = filename.toLowerCase();
     const isDateStamped = /^\d{8}[_T]\d/.test(f);
     const isFoto = /^(foto|photo)_/i.test(f);
+    // FIX 7b: aPic_ = NBC review-photographer naming. Strip csm_ prefix before testing
+    // so both the thumbnail (csm_aPic_*) and the full-res (aPic_*) are detected.
+    const isAPic = /^apic_/i.test(f.replace(/^csm_/, ''));
 
-    // Case/chassis/housing section: ALL images are hardware/device photos
+    // Case/chassis/housing section: device hardware shots
     if (/\b(case|chassis|housing|design|build|communication|operation|features|waterproof|connectivity)\b/i.test(s)) {
       if (isDateStamped) return 'deviceAngles';
-      if (isFoto) return 'cameraSamples'; // Foto_* in case section = camera samples still
+      if (isAPic) return 'device';           // aPic_ in case = product/hero device shots
+      if (isFoto) return 'cameraSamples';    // Foto_* in case = still camera samples
       return null; // let filename classify other types
+    }
+
+    // Camera/photo section: aPic_ images without informative captions are still samples.
+    // (classifyByCaption already handles aPic_ files that have "1x", "Night mode", etc.)
+    if (/\b(camera|photo|image|sample|picture)\b/i.test(s)) {
+      if (isAPic || isFoto) return 'cameraSamples';
+      return null;
     }
 
     // Software section: ALL bare images are screenshots
@@ -2247,6 +2288,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
         || /_software_/i.test(fn)
         || /^\d{8}[_T]\d/i.test(fnBare)                      // date-stamped = device angle
         || /^(foto|photo)_/i.test(fnBare)
+        || /^apic_/i.test(fnBare)                             // FIX 7c: NBC photographer shots
         || /^portrait[_\-]studio/i.test(fnBare)
         || /_test_\d+/i.test(fn)
         || /^[a-z0-9]+(?:_[a-z0-9]+)+_\d{1,2}$/i.test(fnBare)
