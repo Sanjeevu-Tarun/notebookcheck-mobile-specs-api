@@ -736,9 +736,9 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 // ─────────────────────────────────────────────────────────────────────────────
 export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const seen = new Set<string>();
+  const debugLog: any[] = [];
   
-  console.log('=== SEARXNG DEBUG START ===', { normalizedQuery: nq, originalQuery: oq });
-  log('info', 'searxng.start', { normalizedQuery: nq, originalQuery: oq });
+  debugLog.push({ step: 'start', normalizedQuery: nq, originalQuery: oq });
   
   // Multiple SearXNG instances for fallback
   const instances = [
@@ -750,8 +750,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
   // Fire two queries in parallel when nq differs from oq
   const queries = [oq, ...(nq !== oq ? [nq] : [])];
   
-  console.log('=== SEARXNG QUERIES ===', { queries, queryCount: queries.length });
-  log('info', 'searxng.queries', { queries, queryCount: queries.length });
+  debugLog.push({ step: 'queries', queries, queryCount: queries.length });
 
   const doSearch = async (base: string, q: string) => {
     const searchUrl = `${base}/search`;
@@ -762,8 +761,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
       categories: 'general' 
     };
     
-    console.log('=== SEARXNG REQUEST ===', { base, query: q, fullQuery: params.q });
-    log('info', 'searxng.request', { base, query: q, fullQuery: params.q });
+    debugLog.push({ step: 'request', base, query: q, fullQuery: params.q });
     
     const resp = await sharedAxios.get(searchUrl, {
       params,
@@ -774,7 +772,8 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     
     const results = (resp.data?.results || []) as ExternalResultItem[];
     
-    console.log('=== SEARXNG RAW RESPONSE ===', { 
+    debugLog.push({ 
+      step: 'response',
       base, 
       query: q,
       rawResultCount: results.length,
@@ -784,40 +783,25 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
       sampleResults: results.slice(0, 3).map(r => ({ url: r.url, title: r.title }))
     });
     
-    log('info', 'searxng.response', { 
-      base, 
-      query: q,
-      rawResultCount: results.length,
-      statusCode: resp.status,
-      hasData: !!resp.data,
-      dataKeys: resp.data ? Object.keys(resp.data) : [],
-      firstResult: results[0] ? { url: results[0].url, title: results[0].title } : null
-    });
-    
     return results;
   };
 
   // Try each instance until we get results
   for (const base of instances) {
     if (circuitIsOpen(base)) {
-      console.log('=== CIRCUIT BREAKER OPEN ===', { base });
+      debugLog.push({ step: 'circuit_open', base });
       log('warn', 'searxng.circuit_open', { base });
       continue;
     }
 
-    console.log('=== TRYING INSTANCE ===', { base });
+    debugLog.push({ step: 'trying_instance', base });
 
     try {
       const responses = await Promise.all(queries.map(q => doSearch(base, q)));
       const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
       
-      console.log('=== PARALLEL RESULTS COMBINED ===', { 
-        base, 
-        totalRawResults: totalResults,
-        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
-      });
-      
-      log('info', 'searxng.parallel_results', { 
+      debugLog.push({ 
+        step: 'parallel_results',
         base, 
         totalRawResults: totalResults,
         perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
@@ -839,14 +823,14 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
             if (!url.includes('notebookcheck.net')) {
               droppedCount++;
               dropReasons['not_notebookcheck'] = (dropReasons['not_notebookcheck'] || 0) + 1;
-              console.log('=== DROP: not notebookcheck ===', { url, title });
+              debugLog.push({ step: 'drop', reason: 'not_notebookcheck', url, title });
               continue;
             }
             
             if (!/\.\d{4,}\.0\.html/.test(url)) {
               droppedCount++;
               dropReasons['wrong_url_format'] = (dropReasons['wrong_url_format'] || 0) + 1;
-              console.log('=== DROP: wrong URL format ===', { url, title });
+              debugLog.push({ step: 'drop', reason: 'wrong_url_format', url, title });
               continue;
             }
             
@@ -859,7 +843,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
             if (/[?&](tag|q|word)=/.test(url) || /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url)) {
               droppedCount++;
               dropReasons['tag_or_listing_page'] = (dropReasons['tag_or_listing_page'] || 0) + 1;
-              console.log('=== DROP: tag/listing page ===', { url, title });
+              debugLog.push({ step: 'drop', reason: 'tag_or_listing_page', url, title });
               continue;
             }
             
@@ -867,17 +851,18 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
             if (sc < 0) {
               droppedCount++;
               dropReasons['score_negative'] = (dropReasons['score_negative'] || 0) + 1;
-              console.log('=== DROP: negative score ===', { score: sc, url, title });
+              debugLog.push({ step: 'drop', reason: 'score_negative', score: sc, url, title });
               continue;
             }
             
             seen.add(url);
             all.push({ url, title: title || url, score: sc });
-            console.log('=== KEEP ===', { score: sc, url, title });
+            debugLog.push({ step: 'keep', score: sc, url, title });
           }
         }
         
-        console.log('=== FINAL RESULTS ===', { 
+        debugLog.push({ 
+          step: 'final',
           base,
           rawResults: totalResults,
           droppedResults: droppedCount,
@@ -886,26 +871,19 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
           topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title }))
         });
         
-        log('info', 'searxng.final', { 
-          base,
-          rawResults: totalResults,
-          droppedResults: droppedCount,
-          dropReasons,
-          finalResults: all.length,
-          topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title }))
-        });
+        // Store debug in global for debugging
+        (globalThis as any).__searxng_debug = debugLog;
         
         return all;
       } else {
-        console.log('=== ZERO RAW RESULTS FROM THIS INSTANCE ===', { base, queries });
-        log('warn', 'searxng.zero_raw_results', { base, queries });
+        debugLog.push({ step: 'zero_raw_results', base, queries });
       }
     } catch (e) {
-      console.log('=== INSTANCE FAILED ===', { 
+      debugLog.push({ 
+        step: 'instance_error',
         base, 
         error: (e as Error).message,
-        errorName: (e as Error).name,
-        stack: (e as Error).stack
+        errorName: (e as Error).name
       });
       
       if ((e as Error).name !== 'AbortError') {
@@ -913,23 +891,26 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         log('error', 'searxng.failed', { 
           base, 
           err: (e as Error).message,
-          errName: (e as Error).name,
-          stack: (e as Error).stack?.split('\n').slice(0, 5).join(' | ')
+          errName: (e as Error).name
         });
       }
     }
   }
   
-  console.log('=== ALL INSTANCES FAILED ===', { 
+  debugLog.push({ 
+    step: 'all_failed',
     query: nq,
-    instances,
-    message: 'All instances failed or returned 0 results'
+    instances
   });
   
+  // Store debug info globally so it can be retrieved
+  (globalThis as any).__searxng_debug = debugLog;
+  
+  // Also log it
   log('error', 'searxng.all_instances_failed', { 
     query: nq,
     instances,
-    message: 'All instances failed or returned 0 results'
+    debugLog
   });
   
   return [];

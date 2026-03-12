@@ -197,7 +197,14 @@ app.get('/api/nbc/searxng-debug', async (req, res) => {
     stages.searxng = { ms: Date.now() - t1, count: searchResults.length };
 
     if (!searchResults.length) {
-      return res.json({ query: q, stages, totalMs: Date.now() - t0, error: 'SearXNG returned 0 results' });
+      const debugLog = (globalThis as any).__searxng_debug || [];
+      return res.json({ 
+        query: q, 
+        stages, 
+        totalMs: Date.now() - t0, 
+        error: 'SearXNG returned 0 results',
+        debug: debugLog 
+      });
     }
 
     const sorted = searchResults.sort((a: any, b: any) => b.score - a.score);
