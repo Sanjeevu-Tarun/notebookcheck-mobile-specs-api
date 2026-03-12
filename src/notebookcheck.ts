@@ -590,13 +590,17 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
   if (/[?&](tag|q|word)=/.test(u)) return -1;
   if (/\/(topics|search|smartphones|rss-feed|index)\.\d/i.test(u)) return -1;
 
-  // ── HARD-REJECT: news articles, rumours, complaints — not device reviews ────
-  // NBC device reviews always contain "-review" or "smartphone-review" in the URL
-  // slug.  Any NBC page that lacks this is a news post, blog, or listing page —
-  // never a spec/benchmark review.  Matching on the slug (not the full URL) avoids
-  // false-positive hits on subdirectory names like "/smartphones/".
-  const urlSlugForRejectCheck = (u.split('/').pop() || '');
-  if (!/-review/.test(urlSlugForRejectCheck)) return -1;
+  // ── HARD-REJECT: obvious non-review page types ──────────────────────────────
+  // NBC news/article URLs are identifiable by content in their slug.  Rather than
+  // requiring "-review" (which many valid NBC review URLs omit — e.g.
+  // "Pixel-10-Pro-Powerful-smartphone-with-weak-heart.1128379.0.html"), we instead
+  // reject slugs that contain known news/article patterns.
+  const urlSlugLower = (u.split('/').pop() || '');
+  // Reject complaint/issue articles, rumour posts, hands-on/camera-only pieces,
+  // "users-complain", "surfaces-on", "leaked", "announced", "price-drop" etc.
+  if (/users?[-_]complain|complain.*issues?|issues?.*update|rumou?r|leak(ed)?|announced|unveiled|price[-_]drop|hands?[-_]on(?!.*review)|camera[-_]review|camera[-_]test(?!.*smartphone)|first[-_]look|unboxing|teardown/.test(urlSlugLower)) return -1;
+  // Reject external-reviews aggregation pages
+  if (/external[-_]reviews?/.test(urlSlugLower)) return -1;
 
   const qWords    = q.split(/\s+/).filter(w => w.length > 0);
   const coreWords = qWords.filter(w => !BRAND_TOKENS.has(w));
