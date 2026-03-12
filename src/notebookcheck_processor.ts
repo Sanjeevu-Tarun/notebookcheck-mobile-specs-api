@@ -615,11 +615,11 @@ export async function searchProcViaSearXNG(
       params: {
         q: `site:notebookcheck.net ${q} Benchmarks-and-Specs`,
         format: 'json',
-        engines: 'duckduckgo,bing',
+        engines: 'google,bing',  // SPEED: Use google instead of duckduckgo
         categories: 'general',
       },
       headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
-      timeout: 4000,
+      timeout: 6000,  // SPEED: Increased from 4000 to 6000 for reliability
       signal,
     });
     return (resp.data?.results || []) as ExternalItem[];
