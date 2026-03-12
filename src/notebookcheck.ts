@@ -1696,21 +1696,23 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // Basic sanity: must be a known image extension
     if (!/\.(jpe?g|png|webp|gif)(\?.*)?$/i.test(url)) return false;
 
-    // Deduplicate by canonical base filename across ALL buckets.
-    // Prevents collecting both the raw /Notebooks/ file AND its csm_ processed version.
-    // e.g. "Bild_S25_Ultra-0039.jpg" and "csm_Bild_S25_Ultra-0039_12c0e67495.jpg"
-    //   both normalise to "bild_s25_ultra-0039" — second one is rejected.
-    // The raw /Notebooks/ file wins because Pass 1 (figures) runs before Pass 2/3
-    // and NBC figures link the raw file first.
+    // Deduplicate by canonical base filename across ALL buckets (not per-bucket).
+    // Prevents collecting both the raw /Notebooks/ file AND its csm_/_webp_ version,
+    // even when they end up in different buckets (e.g. caption puts Test_4 in
+    // 'screenshots' in Pass 1, then filename puts it in 'deviceAngles' in Pass 2).
+    // e.g. "Vivo_V70_Smartphone_Test_2-q82-w2560-h.webp" and
+    //      "csm_Vivo_V70_Smartphone_Test_2_dcea5566d8.jpg"
+    //   both normalise to "vivo_v70_smartphone_test_2" — second one is rejected globally.
     {
       const baseName = url.split('/').pop()!
         .toLowerCase()
-        .replace(/^csm_/, '')             // strip csm_ prefix
-        .replace(/_[a-f0-9]{8,}\./, '.') // strip hash suffix
-        .replace(/\.[^.]+$/, '');         // strip extension
-      const baseKey = `${bucket}:${baseName}`;
-      if (imgSeenBase.has(baseKey)) return false;
-      imgSeenBase.add(baseKey);
+        .replace(/^csm_/, '')                          // strip csm_ prefix
+        .replace(/_[a-f0-9]{8,}\./, '.')              // strip _HEXHASH.
+        .replace(/-q\d{2,3}(?:-w\d+-h)?(?:-\d+)?\./, '.') // strip -q82-w2560-h.
+        .replace(/\.[^.]+$/, '');                      // strip extension
+      // Global dedup key (no bucket prefix) — same image content in any bucket blocks duplicates
+      if (imgSeenBase.has(baseName)) return false;
+      imgSeenBase.add(baseName);
     }
 
     imgSeen.add(key);
@@ -1863,6 +1865,12 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // Portrait Studio shots are photos taken BY the phone, not product shots of the device.
     // e.g. Portrait_Studio_Samsung_Galaxy_S25_Ultra_4.jpg
     if (/^portrait[_\-]studio/i.test(filename)) return 'cameraSamples';
+    // Date-stamped camera roll files: YYYYMMDD_HHMMSS.jpg or YYYYMMDD_N.jpg
+    // These are photos taken BY the phone (Vivo, OnePlus, Samsung etc. save with this naming)
+    // e.g. 20260228_135613.jpg, 20260301_141950.jpg
+    if (/^\d{8}[_T]\d/.test(filename)) return 'cameraSamples';
+    // Unix timestamp filenames (13-digit ms timestamp): 1708123456789.jpg
+    if (/^\d{13}/.test(filename)) return 'cameraSamples';
 
 
     // ── CHART INTERCEPT (must run BEFORE the generic Foto_* branch) ──────────
