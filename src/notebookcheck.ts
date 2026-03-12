@@ -337,28 +337,128 @@ const CACHE_TTL_SEC = 48 * 60 * 60;         // 48 h in sec (Redis EX param)
 // ── CIRCUIT BREAKER FOR EXTERNAL INSTANCES ───────────────────────────────────
 // FIX: previously unhealthy SearXNG instances were retried on every request.
 // Now a 5-minute cooldown is enforced after 3 consecutive failures.
-const CIRCUIT_FAIL_THRESHOLD = 3;
-const CIRCUIT_COOLDOWN_MS    = 5 * 60 * 1000;
-interface CircuitState { fails: number; cooldownUntil: number; }
+// Circuit breaker with adaptive threshold - more forgiving for cold starts
+const CIRCUIT_FAIL_THRESHOLD = 10;  // Increased from 3 to 10
+const CIRCUIT_COOLDOWN_MS    = 2 * 60 * 1000;  // Reduced from 5min to 2min
+const CIRCUIT_HALF_OPEN_THRESHOLD = 0.5; // Allow 50% requests when recovering
+interface CircuitState { 
+  fails: number; 
+  successes: number;
+  cooldownUntil: number; 
+  halfOpen: boolean;
+  lastAttempt: number;
+}
 const circuitBreakers = new Map<string, CircuitState>();
 
 function circuitIsOpen(host: string): boolean {
   const s = circuitBreakers.get(host);
   if (!s) return false;
-  if (s.cooldownUntil > Date.now()) return true;
-  circuitBreakers.delete(host); // cooldown expired — reset
+  
+  // If in cooldown, check if we should enter half-open state
+  if (s.cooldownUntil > Date.now()) {
+    // In half-open state, allow some requests through probabilistically
+    if (s.halfOpen && Math.random() < CIRCUIT_HALF_OPEN_THRESHOLD) {
+      return false; // Let this request through
+    }
+    return true; // Still in cooldown
+  }
+  
+  // Cooldown expired — reset and enter half-open state
+  s.halfOpen = true;
+  s.fails = 0;
+  s.successes = 0;
+  circuitBreakers.set(host, s);
   return false;
 }
+
 function circuitRecordFailure(host: string): void {
-  const s = circuitBreakers.get(host) ?? { fails: 0, cooldownUntil: 0 };
+  const s = circuitBreakers.get(host) ?? { 
+    fails: 0, 
+    successes: 0,
+    cooldownUntil: 0,
+    halfOpen: false,
+    lastAttempt: Date.now()
+  };
   s.fails++;
+  s.lastAttempt = Date.now();
+  
+  // Only open circuit if we have consistent failures
   if (s.fails >= CIRCUIT_FAIL_THRESHOLD) {
     s.cooldownUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
-    log('warn', 'circuit.open', { host, until: new Date(s.cooldownUntil).toISOString() });
+    s.halfOpen = true; // Start in half-open to allow gradual recovery
+    log('warn', 'circuit.open', { 
+      host, 
+      fails: s.fails,
+      until: new Date(s.cooldownUntil).toISOString() 
+    });
   }
   circuitBreakers.set(host, s);
 }
-function circuitRecordSuccess(host: string): void { circuitBreakers.delete(host); }
+
+function circuitRecordSuccess(host: string): void { 
+  const s = circuitBreakers.get(host);
+  if (!s) return;
+  
+  s.successes++;
+  s.lastAttempt = Date.now();
+  
+  // If we had 3 successes in half-open state, fully reset
+  if (s.halfOpen && s.successes >= 3) {
+    log('info', 'circuit.closed', { host });
+    circuitBreakers.delete(host);
+  } else if (s.successes >= 5) {
+    // After 5 successes, clear any failure history
+    circuitBreakers.delete(host);
+  } else {
+    // Reduce failure count on success
+    s.fails = Math.max(0, s.fails - 2);
+    circuitBreakers.set(host, s);
+  }
+}
+
+// Helper function to implement retry with exponential backoff
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  initialDelayMs: number = 1000,
+  maxDelayMs: number = 10000
+): Promise<T> {
+  let lastError: Error | undefined;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e as Error;
+      
+      // Don't retry on abort errors
+      if (lastError.name === 'AbortError') {
+        throw lastError;
+      }
+      
+      // If this was the last attempt, throw
+      if (attempt === maxRetries) {
+        break;
+      }
+      
+      // Calculate backoff delay with jitter
+      const baseDelay = Math.min(initialDelayMs * Math.pow(2, attempt), maxDelayMs);
+      const jitter = Math.random() * 0.3 * baseDelay; // ±30% jitter
+      const delay = baseDelay + jitter;
+      
+      log('debug', 'retry.attempt', { 
+        attempt: attempt + 1, 
+        maxRetries, 
+        delayMs: Math.round(delay),
+        error: lastError.message 
+      });
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError || new Error('Retry failed');
+}
 
 // ── IN-MEMORY CACHE with LRU eviction ────────────────────────────────────────
 // BUG FIX: previously the Map grew unbounded — expired entries were checked on
@@ -739,7 +839,10 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
   const all: SearchResult[] = [];
   const base = 'https://searxng-notebookcheck.onrender.com';
 
-  if (circuitIsOpen(base)) return [];
+  if (circuitIsOpen(base)) {
+    log('debug', 'searxng.circuit_open', { base });
+    return [];
+  }
 
   // Fire two queries in parallel when nq differs from oq:
   //   q1 = original query (e.g. "Samsung Galaxy Z Fold 7 review")
@@ -747,19 +850,40 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
   // Merging both gives more results and better coverage for new/unreleased devices.
   const queries = [oq, ...(nq !== oq ? [nq] : [])];
 
-  const doSearch = async (q: string) => {
+  const doSearch = async (q: string, attemptNum: number = 0) => {
+    // Use longer timeout on first attempt to handle cold starts
+    // Render.com can take up to 30 seconds for cold start
+    const timeout = attemptNum === 0 ? 35000 : 8000;
+    
     const resp = await sharedAxios.get(`${base}/search`, {
-      params: { q: `site:notebookcheck.net ${q} review`, format: 'json', engines: 'google,bing,duckduckgo', categories: 'general' },
+      params: { 
+        q: `site:notebookcheck.net ${q} review`, 
+        format: 'json', 
+        engines: 'google,bing,duckduckgo', 
+        categories: 'general' 
+      },
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-      timeout: 4000,
+      timeout,
       signal,
     });
     return (resp.data?.results || []) as ExternalResultItem[];
   };
 
   try {
-    const responses = await Promise.all(queries.map(q => doSearch(q)));
+    // Use retry logic with exponential backoff for each query
+    const responses = await Promise.all(
+      queries.map((q, idx) => 
+        retryWithBackoff(
+          () => doSearch(q, idx),
+          3,  // max 3 retries
+          2000,  // start with 2s delay
+          15000  // max 15s delay
+        )
+      )
+    );
+    
     circuitRecordSuccess(base);
+    log('info', 'searxng.success', { base, resultCount: responses.reduce((sum, r) => sum + r.length, 0) });
 
     for (const items of responses) {
       for (const item of items) {
@@ -776,7 +900,11 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
   } catch (e) {
     if ((e as Error).name !== 'AbortError') {
       circuitRecordFailure(base);
-      log('debug', 'searxng.failed', { err: (e as Error).message });
+      log('error', 'searxng.failed', { 
+        base, 
+        err: (e as Error).message,
+        stack: (e as Error).stack?.split('\n').slice(0, 3).join(' | ')
+      });
     }
   }
   return all;
