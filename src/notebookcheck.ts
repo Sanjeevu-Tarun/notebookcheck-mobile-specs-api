@@ -1125,6 +1125,11 @@ function isDeviceInfoHeader(name: string): boolean {
 // ══════════════════════════════════════════════════════════════════════════════
 //  DEVICE PAGE SCRAPER
 // ══════════════════════════════════════════════════════════════════════════════
+export async function clearDeviceCache(pageUrl: string): Promise<void> {
+  const ck = `nbc:device:${CACHE_VERSION}:${pageUrl}`;
+  try { await redisSet(ck, null); } catch {} // overwrite with null = effectively cleared
+}
+
 export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: string, signal?: AbortSignal): Promise<NBCDeviceData> {
   const ck = `nbc:device:${CACHE_VERSION}:${pageUrl}`;
   const cached = await getCacheAs<NBCDeviceData>(ck); if (cached) return cached;

@@ -480,52 +480,39 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
   return bestScore > 0 ? best : null;
 }
 
-// Cache key for full scraped device data — stored separately from index entries
-function scrapeDataKey(url: string): string {
-  // Use a short hash of the URL to keep key size small
-  let h = 0;
-  for (let i = 0; i < url.length; i++) { h = (Math.imul(31, h) + url.charCodeAt(i)) | 0; }
-  return `nbc:scrape:v1:${Math.abs(h)}`;
-}
 
-export async function clearScrapeCache(url: string): Promise<void> {
-  await rDel(scrapeDataKey(url));
+// ── SCRAPE INDEXED DEVICE ────────────────────────────────────────────────────export async function clearScrapeCache(url: string): Promise<void> {
+  const { clearDeviceCache } = await import('./notebookcheck');
+  await clearDeviceCache(url);
 }
 
 export async function scrapeIndexedDevice(url: string): Promise<{ success: boolean; data?: any; error?: string; cached?: boolean }> {
-  // Check Redis cache first — if we already scraped this device, return instantly
-  const cacheKey = scrapeDataKey(url);
-  try {
-    const cached = await rGet(cacheKey);
-    if (cached) return { success: true, data: cached, cached: true };
-  } catch { /* cache miss — proceed to scrape */ }
-
-  const entries = await loadEntries();
-  let entry = entries[url];
-  if (!entry) {
-    const slug = url.split('/').pop() || '';
-    entry = { url, title: slug.replace(/\.\d+\.0\.html$/, '').replace(/-/g, ' ').trim(),
-      brand: 'Unknown', slug, discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
-  }
-  entries[url] = { ...entry, status: 'scraping' };
-  await saveEntries(entries);
-
+  // scrapeNotebookCheckDevice has its own Redis cache (nbc:device:...) — use it directly
+  // Avoids: double caching, double Redis round-trips, loading 1686 entries just for status update
   try {
     const { scrapeNotebookCheckDevice } = await import('./notebookcheck');
-    const data = await scrapeNotebookCheckDevice(url, entry.title);
+    const t0 = Date.now();
+    const data = await scrapeNotebookCheckDevice(url);
+    const ms = Date.now() - t0;
+    // If scrape took <200ms it almost certainly came from Redis cache
+    const cached = ms < 200;
 
-    // Save full scrape data permanently — never expires
-    await rSetPermanent(cacheKey, data);
+    // Update entry status in background — fire and forget
+    loadEntries().then(entries => {
+      if (entries[url]) {
+        entries[url] = { ...entries[url], status: 'done', scrapedAt: new Date().toISOString() };
+        saveEntries(entries).catch(() => {});
+      }
+    }).catch(() => {});
 
-    const fresh = await loadEntries();
-    fresh[url] = { ...(fresh[url] || entry), status: 'done', scrapedAt: new Date().toISOString(), errorMsg: undefined };
-    await saveEntries(fresh);
-    return { success: true, data, cached: false };
+    return { success: true, data, cached };
   } catch (e: any) {
-    const fresh = await loadEntries();
-    const ex = fresh[url] || entry;
-    fresh[url] = { ...ex, status: 'error', errorMsg: e?.message ?? String(e), retries: (ex.retries ?? 0) + 1 };
-    await saveEntries(fresh);
+    loadEntries().then(entries => {
+      if (entries[url]) {
+        entries[url] = { ...entries[url], status: 'error', errorMsg: e?.message ?? String(e), retries: (entries[url].retries ?? 0) + 1 };
+        saveEntries(entries).catch(() => {});
+      }
+    }).catch(() => {});
     return { success: false, error: e?.message ?? String(e) };
   }
 }
