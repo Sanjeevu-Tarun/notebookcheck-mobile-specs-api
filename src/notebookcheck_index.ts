@@ -28,11 +28,13 @@ const PROGRESS_KEY  = `nbc:index:${INDEX_VERSION}:crawl_progress`;
 const ENTRIES_TTL   = 30 * 24 * 3600;
 const LOCK_TTL      = 300;
 
-// Chronological listing — all device types sorted by date added.
-// This is the correct source: contains BOTH full reviews and aggregator/library pages,
-// ordered newest-first. extractPhoneUrls + smartphone keyword filtering handles
-// the separation — any row whose title/label contains "Smartphone" is kept;
-// laptops, tablets, and other hardware are discarded.
+// SOURCE A — NBC Smartphones review listing (internal NBC reviews only, ~80 pages)
+// Each entry has "-review-" in its slug and contains full benchmarks/specs/images.
+const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Smartphones.155.0.html';
+
+// SOURCE B — Chronological listing (all device types, library/external pages)
+// Used only for phones that NBC hasn't written their own review for yet.
+// We skip any URL that already exists from SOURCE A.
 const NBC_CHRONO_BASE = 'https://www.notebookcheck.net/Chronological-sorting.2690.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
@@ -328,64 +330,123 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  CRAWL ONE PAGE
+//  CRAWL — TWO SOURCES
+//
+//  SOURCE A: crawlReviewsPage(page)
+//    NBC Smartphones review listing — internal NBC reviews only (~80 pages).
+//    These have "-review-" in their slug and contain full benchmarks/specs/images.
+//    Pagination: ?p=N (1-indexed)
+//
+//  SOURCE B: crawlChronoPage(page)
+//    Chronological listing — all device types including library/external pages.
+//    Only adds phones NOT already in the index from Source A.
+//    Skips any URL that already has a review entry for the same device slug.
+//    No resolveToReviewUrl needed — library URLs are only added as fallback.
 // ══════════════════════════════════════════════════════════════════════════════
 
 export interface CrawlPageResult {
   page: number; phonesFound: number; totalUrls: number;
   newUrls: number; done: boolean; nextPage: number | null; durationMs: number;
+  source: 'reviews' | 'chrono';
 }
 
-export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
-  const t0  = Date.now();
+function makeEntry(url: string, title: string): IndexEntry {
+  return { url, title, brand: extractBrand(title), slug: url.split('/').pop() || '',
+    discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
+}
 
-  // ── Source: NBC Chronological listing ────────────────────────────────────
-  // All device types sorted newest-first. Paginated via ?&ns_page=N.
-  // extractPhoneUrls checks for "Smartphone" in the table row — cleanest filter.
-  const chronoUrl = page === 1 ? NBC_CHRONO_BASE : `${NBC_CHRONO_BASE}?&ns_page=${page}`;
+// ── SOURCE A: NBC Smartphones reviews listing ─────────────────────────────────
+export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
+  const t0 = Date.now();
+  const url = page === 1 ? NBC_REVIEWS_BASE : `${NBC_REVIEWS_BASE}?p=${page}`;
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
 
-  const chronoHtml = await fetchHtml(chronoUrl);
-  const found = extractPhoneUrls(chronoHtml);
+  const found: Array<{ url: string; title: string }> = [];
+  const seen = new Set<string>();
 
-  // Done when the page returns no device links at all
-  const rawLinks = (chronoHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
-  const pageIsEmpty = rawLinks === 0;
+  $('a[href]').each((_, el) => {
+    let href = $(el).attr('href') || '';
+    if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+    href = href.split('?')[0];
+    if (!href.includes('notebookcheck.net')) return;
+    if (!/-review-/i.test(href)) return;          // SOURCE A: review URLs only
+    if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+    if (seen.has(href.toLowerCase())) return;
+    seen.add(href.toLowerCase());
+
+    const title = ($(el).attr('title') || $(el).text().trim() || '')
+      .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
+    // Clean review title: strip everything after " - " (article subtitle)
+    const cleanTitle = title.split(' - ')[0].split(' review')[0].trim();
+    if (cleanTitle.length < 4) return;
+    found.push({ url: href, title: cleanTitle });
+  });
+
+  // Empty page = no review links at all
+  const pageIsEmpty = found.length === 0 && !html.includes('notebookcheck.net');
 
   const entries = await loadEntries();
   let newUrls = 0;
-
-  // For each discovered library URL, resolve it to the NBC internal review URL.
-  // Library pages (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html) link to the full
-  // internal review in their "Reviews" section — that URL has complete specs and benchmarks.
-  // We run resolutions in parallel (capped at 5 concurrent) to keep crawl time reasonable.
-  // Results are Redis-cached for 7 days so subsequent crawls skip the fetch entirely.
-  const CONCURRENCY = 5;
-  const resolved: Array<{ url: string; title: string }> = [];
-  for (let i = 0; i < found.length; i += CONCURRENCY) {
-    const batch = found.slice(i, i + CONCURRENCY);
-    const resolvedBatch = await Promise.all(
-      batch.map(async ({ url: u, title }) => {
-        const finalUrl = await resolveToReviewUrl(u).catch(() => u);
-        return { url: finalUrl, title };
-      })
-    );
-    resolved.push(...resolvedBatch);
+  for (const { url: u, title } of found) {
+    if (!entries[u]) { entries[u] = makeEntry(u, title); newUrls++; }
   }
-
-  for (const { url: u, title } of resolved) {
-    if (!entries[u]) {
-      entries[u] = { url: u, title, brand: extractBrand(title), slug: u.split('/').pop() || '',
-        discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
-      newUrls++;
-    }
-  }
-  await saveEntries(entries);
+  if (newUrls > 0) await saveEntries(entries);
 
   const totalUrls = Object.keys(entries).length;
-  const progress: CrawlProgress = { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-  await rSet(PROGRESS_KEY, progress, LOCK_TTL);
+  await rSet(PROGRESS_KEY, { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, LOCK_TTL);
 
-  return { page, phonesFound: found.length, totalUrls, newUrls, done: pageIsEmpty, nextPage: pageIsEmpty ? null : page + 1, durationMs: Date.now() - t0 };
+  return { page, phonesFound: found.length, totalUrls, newUrls,
+    done: pageIsEmpty || found.length === 0, nextPage: pageIsEmpty ? null : page + 1,
+    durationMs: Date.now() - t0, source: 'reviews' };
+}
+
+// ── SOURCE B: Chronological listing (library/external fallback) ───────────────
+export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
+  const t0 = Date.now();
+  const chronoUrl = page === 1 ? NBC_CHRONO_BASE : `${NBC_CHRONO_BASE}?&ns_page=${page}`;
+  const html = await fetchHtml(chronoUrl);
+  const found = extractPhoneUrls(html);
+
+  const rawLinks = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = rawLinks === 0;
+
+  const entries = await loadEntries();
+
+  // Build a set of device slug prefixes already covered by a review URL
+  // e.g. "samsung-galaxy-s25-ultra" from "Samsung-Galaxy-S25-Ultra-review-....html"
+  // Any chrono library URL matching this prefix is skipped — review already exists.
+  const reviewPrefixes = new Set<string>();
+  for (const u of Object.keys(entries)) {
+    if (/-review-/i.test(u)) {
+      const slug = u.split('/').pop() || '';
+      reviewPrefixes.add(slug.toLowerCase().split('-review-')[0]);
+    }
+  }
+
+  let newUrls = 0;
+  for (const { url: u, title } of found) {
+    if (entries[u]) continue; // already in index
+    // Skip if a review URL for the same device already exists
+    const slug = u.split('/').pop() || '';
+    const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
+    if (reviewPrefixes.has(prefix)) continue;
+    entries[u] = makeEntry(u, title);
+    newUrls++;
+  }
+  if (newUrls > 0) await saveEntries(entries);
+
+  const totalUrls = Object.keys(entries).length;
+  await rSet(PROGRESS_KEY, { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }, LOCK_TTL);
+
+  return { page, phonesFound: found.length, totalUrls, newUrls,
+    done: pageIsEmpty, nextPage: pageIsEmpty ? null : page + 1,
+    durationMs: Date.now() - t0, source: 'chrono' };
+}
+
+// Legacy alias — kept for existing /api/index/crawl-page endpoint compatibility
+export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
+  return crawlChronoPage(page);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
