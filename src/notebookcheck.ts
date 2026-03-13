@@ -731,313 +731,186 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TOKEN-BUCKET RATE LIMITER
-// Google allows ~1 query per 2 s before IP-level CAPTCHAs kick in.
-// This bucket lets bursts of up to 3 through (cold start) then enforces
-// one slot per SEARCH_INTERVAL_MS thereafter — no matter how many concurrent
-// API callers are active.
-// ─────────────────────────────────────────────────────────────────────────────
-const SEARCH_INTERVAL_MS = 2000; // minimum gap between SearXNG requests
-const BURST_TOKENS       = 3;    // initial burst allowed before throttling
-
-let _tokens      = BURST_TOKENS;
-let _lastRefill  = Date.now();
-const _searchQueue: Array<() => void> = [];
-let   _draining  = false;
-
-function _refillTokens(): void {
-  const now = Date.now();
-  const elapsed = now - _lastRefill;
-  const newTokens = Math.floor(elapsed / SEARCH_INTERVAL_MS);
-  if (newTokens > 0) {
-    _tokens = Math.min(BURST_TOKENS, _tokens + newTokens);
-    _lastRefill = now;
-  }
-}
-
-function _drainQueue(): void {
-  if (_draining) return;
-  _draining = true;
-  const tick = () => {
-    _refillTokens();
-    if (_tokens > 0 && _searchQueue.length > 0) {
-      _tokens--;
-      const next = _searchQueue.shift()!;
-      next();
-    }
-    if (_searchQueue.length > 0) {
-      setTimeout(tick, SEARCH_INTERVAL_MS);
-    } else {
-      _draining = false;
-    }
-  };
-  tick();
-}
-
-/** Acquire a rate-limit token. Resolves when it is safe to fire a SearXNG request. */
-function acquireSearchSlot(): Promise<void> {
-  _refillTokens();
-  if (_tokens > 0) {
-    _tokens--;
-    return Promise.resolve();
-  }
-  return new Promise<void>(resolve => {
-    _searchQueue.push(resolve);
-    _drainQueue();
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IN-FLIGHT DEDUPLICATION
-// If two callers search the same key simultaneously we reuse the same Promise
-// instead of firing two Google requests. The second caller costs 0 tokens.
-// ─────────────────────────────────────────────────────────────────────────────
-const _inFlight = new Map<string, Promise<SearchResult[]>>();
-
-function _dedupSearch(key: string, fn: () => Promise<SearchResult[]>): Promise<SearchResult[]> {
-  if (_inFlight.has(key)) return _inFlight.get(key)!;
-  const p = fn().finally(() => _inFlight.delete(key));
-  _inFlight.set(key, p);
-  return p;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GOOGLE RATE-LIMIT DETECTOR
-// When Google blocks the Render IP it returns a 200 HTML page (CAPTCHA / 
-// "unusual traffic" notice) rather than a 429. SearXNG returns it wrapped
-// as 0 results with no error, so we detect it in the raw HTML.
-// ─────────────────────────────────────────────────────────────────────────────
-function isRateLimitedResponse(data: unknown): boolean {
-  if (typeof data !== 'object' || !data) return false;
-  const d = data as Record<string, unknown>;
-  // SearXNG sometimes leaks the raw captcha/block notice into answers[].
-  if (Array.isArray(d.answers) && d.answers.some((a: unknown) =>
-    typeof a === 'string' && /unusual traffic|captcha|automated queries/i.test(a))) return true;
-  // Check unresponsive_engines list for google
-  if (Array.isArray(d.unresponsive_engines)) {
-    const blocked = d.unresponsive_engines.some((e: unknown) =>
-      typeof e === 'object' && e !== null &&
-      /google/i.test(String((e as any).name ?? '')) &&
-      /429|rate.?limit|captcha|blocked/i.test(String((e as any).error ?? '')));
-    if (blocked) return true;
-  }
-  return false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TOKEN-BUCKET RATE LIMITER
-// Google allows ~1 request/2 s before CAPTCHAs trigger on shared Render IPs.
-// Burst of 3 allowed at cold-start, then one slot per SEARCH_INTERVAL_MS.
-// ─────────────────────────────────────────────────────────────────────────────
-const SEARCH_INTERVAL_MS = 2000; // minimum gap between SearXNG→Google requests
-const BURST_TOKENS       = 3;    // burst capacity before throttling kicks in
-let _tokens     = BURST_TOKENS;
-let _lastRefill = Date.now();
-const _searchQueue: Array<() => void> = [];
-let   _draining  = false;
-
-function _refillTokens(): void {
-  const now     = Date.now();
-  const newToks = Math.floor((now - _lastRefill) / SEARCH_INTERVAL_MS);
-  if (newToks > 0) {
-    _tokens     = Math.min(BURST_TOKENS, _tokens + newToks);
-    _lastRefill = now;
-  }
-}
-
-function _drainQueue(): void {
-  if (_draining) return;
-  _draining = true;
-  const tick = () => {
-    _refillTokens();
-    if (_tokens > 0 && _searchQueue.length > 0) {
-      _tokens--;
-      _searchQueue.shift()!();
-    }
-    if (_searchQueue.length > 0) setTimeout(tick, SEARCH_INTERVAL_MS);
-    else _draining = false;
-  };
-  tick();
-}
-
-/** Acquire a rate-limit slot before every SearXNG/Google request. */
-function acquireSearchSlot(): Promise<void> {
-  _refillTokens();
-  if (_tokens > 0) { _tokens--; return Promise.resolve(); }
-  return new Promise<void>(resolve => { _searchQueue.push(resolve); _drainQueue(); });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IN-FLIGHT DEDUPLICATION
-// If two callers search the same query simultaneously, share the in-flight
-// Promise — second caller pays 0 extra tokens and gets the result instantly
-// when the first resolves.
-// ─────────────────────────────────────────────────────────────────────────────
-const _inFlight = new Map<string, Promise<SearchResult[]>>();
-
-function _dedupSearch(key: string, fn: () => Promise<SearchResult[]>): Promise<SearchResult[]> {
-  if (_inFlight.has(key)) return _inFlight.get(key)!;
-  const p = fn().finally(() => _inFlight.delete(key));
-  _inFlight.set(key, p);
-  return p;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// GOOGLE RATE-LIMIT DETECTOR
-// When rate-limited Google returns HTTP 200 with a CAPTCHA HTML page (not 429).
-// SearXNG surfaces this as 0 results or via the unresponsive_engines field.
-// Detect both and throw so the circuit breaker fires and we back off properly.
-// ─────────────────────────────────────────────────────────────────────────────
-function isRateLimitedResponse(data: unknown): boolean {
-  if (typeof data !== 'object' || !data) return false;
-  const d = data as Record<string, unknown>;
-  // SearXNG sometimes leaks captcha text into the answers[] array
-  if (Array.isArray(d.answers) && d.answers.some((a: unknown) =>
-    typeof a === 'string' && /unusual traffic|captcha|automated queries/i.test(a))) return true;
-  // unresponsive_engines: google marked as rate-limited
-  if (Array.isArray(d.unresponsive_engines) && d.unresponsive_engines.some((e: unknown) =>
-    typeof e === 'object' && e !== null &&
-    /google/i.test(String((e as any).name ?? '')) &&
-    /429|rate.?limit|captcha|blocked/i.test(String((e as any).error ?? '')))) return true;
-  return false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SEARCH: SearXNG — throttled, deduplicated, rate-limit-aware
+// SEARCH: SearXNG
+// Circuit breaker prevents hammering the instance when it is consistently down.
 // ─────────────────────────────────────────────────────────────────────────────
 export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  // Reuse in-flight promise for identical concurrent queries (0 token cost)
-  return _dedupSearch(`${nq}||${oq}`, () => _searchViaSearXNGInner(nq, oq, signal));
-}
-
-async function _searchViaSearXNGInner(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  const seen      = new Set<string>();
+  const seen = new Set<string>();
   const debugLog: any[] = [];
+  
   debugLog.push({ step: 'start', normalizedQuery: nq, originalQuery: oq });
-
-  // Only use your own instance — public ones are blocked/rate-limited
+  
+  // Only use your own instance - public ones are blocked/rate limited
   const instances = [
     'https://searxng-notebookcheck.onrender.com',
   ];
 
-  // ── SINGLE QUERY STRATEGY ─────────────────────────────────────────────────
-  // Old code fired oq AND nq in parallel = 2 Google hits per search.
-  // New: pick the single best form; only fall back to the other if 0 results.
-  // This halves token consumption immediately.
-  const primaryQuery = (nq !== oq && nq.length > oq.length) ? nq : oq;
-  debugLog.push({ step: 'query', primaryQuery, nq, oq });
+  // Fire two queries in parallel when nq differs from oq
+  const queries = [oq, ...(nq !== oq ? [nq] : [])];
+  
+  debugLog.push({ step: 'queries', queries, queryCount: queries.length });
 
-  const doSearch = async (base: string, q: string): Promise<ExternalResultItem[]> => {
-    // Enforce the rate limit before EVERY Google request
-    await acquireSearchSlot();
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-    debugLog.push({ step: 'request', base, query: q, fullQuery: `site:notebookcheck.net ${q} review` });
-
-    const resp = await sharedAxios.get(`${base}/search`, {
-      params: {
-        q: `site:notebookcheck.net ${q} review`,
-        format: 'json',
-        engines: 'google,bing',
-        categories: 'general',
-      },
+  const doSearch = async (base: string, q: string) => {
+    const searchUrl = `${base}/search`;
+    const params = { 
+      q: `site:notebookcheck.net ${q} review`, 
+      format: 'json', 
+      engines: 'google,bing,duckduckgo', 
+      categories: 'general' 
+    };
+    
+    debugLog.push({ step: 'request', base, query: q, fullQuery: params.q });
+    
+    const resp = await sharedAxios.get(searchUrl, {
+      params,
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-      timeout: 8000,
+      timeout: 15000, // Increased to 15s for cold starts
       signal,
     });
-
-    // Detect Google CAPTCHA masquerading as a normal 200 response
-    if (isRateLimitedResponse(resp.data)) {
-      throw Object.assign(new Error('Google rate-limited (CAPTCHA detected)'), { isRateLimit: true });
-    }
-
+    
     const results = (resp.data?.results || []) as ExternalResultItem[];
-    debugLog.push({
-      step: 'response', base, query: q,
-      rawResultCount: results.length, statusCode: resp.status,
-      sampleResults: results.slice(0, 3).map(r => ({ url: r.url, title: r.title })),
+    
+    debugLog.push({ 
+      step: 'response',
+      base, 
+      query: q,
+      rawResultCount: results.length,
+      statusCode: resp.status,
+      hasData: !!resp.data,
+      dataKeys: resp.data ? Object.keys(resp.data) : [],
+      sampleResults: results.slice(0, 3).map(r => ({ url: r.url, title: r.title }))
     });
+    
     return results;
   };
 
+  // Try each instance until we get results
   for (const base of instances) {
     if (circuitIsOpen(base)) {
       debugLog.push({ step: 'circuit_open', base });
       log('warn', 'searxng.circuit_open', { base });
       continue;
     }
+
     debugLog.push({ step: 'trying_instance', base });
 
     try {
-      // Primary query first; only try alternate form if 0 results (saves tokens)
-      let items = await doSearch(base, primaryQuery);
-
-      if (items.length === 0 && nq !== oq) {
-        const fallbackQ = primaryQuery === nq ? oq : nq;
-        log('info', 'searxng.fallback_query', { base, fallbackQ });
-        items = await doSearch(base, fallbackQ);
-      }
-
-      debugLog.push({ step: 'parallel_results', base, totalRawResults: items.length });
-
-      if (items.length > 0) {
+      const responses = await Promise.all(queries.map(q => doSearch(base, q)));
+      const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
+      
+      debugLog.push({ 
+        step: 'parallel_results',
+        base, 
+        totalRawResults: totalResults,
+        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
+      });
+      
+      if (totalResults > 0) {
         circuitRecordSuccess(base);
+        
         const all: SearchResult[] = [];
         let droppedCount = 0;
-        const dropReasons: Record<string, number> = {};
-
-        for (const item of items) {
-          const url   = (item.url   || '').trim();
-          const title = (item.title || '').trim();
-
-          if (!url.includes('notebookcheck.net'))                            { droppedCount++; dropReasons['not_notebookcheck'] = (dropReasons['not_notebookcheck'] || 0) + 1; debugLog.push({ step: 'drop', reason: 'not_notebookcheck', url, title }); continue; }
-          if (!/\.\d{4,}\.0\.html/.test(url))                               { droppedCount++; dropReasons['wrong_url_format']  = (dropReasons['wrong_url_format']  || 0) + 1; debugLog.push({ step: 'drop', reason: 'wrong_url_format', url, title }); continue; }
-          if (seen.has(url))                                                 { droppedCount++; dropReasons['duplicate']         = (dropReasons['duplicate']         || 0) + 1; continue; }
-          if (/[?&](tag|q|word)=/.test(url) ||
-              /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url))     { droppedCount++; dropReasons['tag_or_listing']   = (dropReasons['tag_or_listing']   || 0) + 1; debugLog.push({ step: 'drop', reason: 'tag_or_listing', url, title }); continue; }
-
-          const sc = scoreCandidate(title || url, url, nq, oq);
-          if (sc < 0)                                                        { droppedCount++; dropReasons['score_negative']   = (dropReasons['score_negative']   || 0) + 1; debugLog.push({ step: 'drop', reason: 'score_negative', score: sc, url, title }); continue; }
-
-          seen.add(url);
-          all.push({ url, title: title || url, score: sc });
-          debugLog.push({ step: 'keep', score: sc, url, title });
+        let dropReasons: Record<string, number> = {};
+        
+        for (const items of responses) {
+          for (const item of items) {
+            const url   = (item.url || '').trim();
+            const title = (item.title || '').trim();
+            
+            // Track why results get dropped
+            if (!url.includes('notebookcheck.net')) {
+              droppedCount++;
+              dropReasons['not_notebookcheck'] = (dropReasons['not_notebookcheck'] || 0) + 1;
+              debugLog.push({ step: 'drop', reason: 'not_notebookcheck', url, title });
+              continue;
+            }
+            
+            if (!/\.\d{4,}\.0\.html/.test(url)) {
+              droppedCount++;
+              dropReasons['wrong_url_format'] = (dropReasons['wrong_url_format'] || 0) + 1;
+              debugLog.push({ step: 'drop', reason: 'wrong_url_format', url, title });
+              continue;
+            }
+            
+            if (seen.has(url)) {
+              droppedCount++;
+              dropReasons['duplicate'] = (dropReasons['duplicate'] || 0) + 1;
+              continue;
+            }
+            
+            if (/[?&](tag|q|word)=/.test(url) || /\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(url)) {
+              droppedCount++;
+              dropReasons['tag_or_listing_page'] = (dropReasons['tag_or_listing_page'] || 0) + 1;
+              debugLog.push({ step: 'drop', reason: 'tag_or_listing_page', url, title });
+              continue;
+            }
+            
+            const sc = scoreCandidate(title || url, url, nq, oq);
+            if (sc < 0) {
+              droppedCount++;
+              dropReasons['score_negative'] = (dropReasons['score_negative'] || 0) + 1;
+              debugLog.push({ step: 'drop', reason: 'score_negative', score: sc, url, title });
+              continue;
+            }
+            
+            seen.add(url);
+            all.push({ url, title: title || url, score: sc });
+            debugLog.push({ step: 'keep', score: sc, url, title });
+          }
         }
-
-        debugLog.push({
-          step: 'final', base,
-          rawResults: items.length, droppedResults: droppedCount, dropReasons,
+        
+        debugLog.push({ 
+          step: 'final',
+          base,
+          rawResults: totalResults,
+          droppedResults: droppedCount,
+          dropReasons,
           finalResults: all.length,
-          topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title })),
+          topResults: all.slice(0, 3).map(r => ({ score: r.score, url: r.url, title: r.title }))
         });
+        
+        // Store debug in global for debugging
         (globalThis as any).__searxng_debug = debugLog;
+        
         return all;
-
       } else {
-        debugLog.push({ step: 'zero_raw_results', base, primaryQuery });
+        debugLog.push({ step: 'zero_raw_results', base, queries });
       }
-
-    } catch (e: unknown) {
-      const err = e as Error & { isRateLimit?: boolean };
-      debugLog.push({ step: 'instance_error', base, error: err.message, errorName: err.name });
-
-      if (err.name !== 'AbortError') {
-        if (err.isRateLimit) {
-          // Double-penalty on rate-limit → trips circuit breaker faster
-          circuitRecordFailure(base);
-          circuitRecordFailure(base);
-          log('warn', 'searxng.rate_limited', { base });
-        } else {
-          circuitRecordFailure(base);
-        }
-        log('error', 'searxng.failed', { base, err: err.message, errName: err.name });
+    } catch (e) {
+      debugLog.push({ 
+        step: 'instance_error',
+        base, 
+        error: (e as Error).message,
+        errorName: (e as Error).name
+      });
+      
+      if ((e as Error).name !== 'AbortError') {
+        circuitRecordFailure(base);
+        log('error', 'searxng.failed', { 
+          base, 
+          err: (e as Error).message,
+          errName: (e as Error).name
+        });
       }
     }
   }
-
-  debugLog.push({ step: 'all_failed', query: nq, instances });
+  
+  debugLog.push({ 
+    step: 'all_failed',
+    query: nq,
+    instances
+  });
+  
+  // Store debug info globally so it can be retrieved
   (globalThis as any).__searxng_debug = debugLog;
-  log('error', 'searxng.all_instances_failed', { query: nq, instances, debugLog });
+  
+  // Also log it
+  log('error', 'searxng.all_instances_failed', { 
+    query: nq,
+    instances,
+    debugLog
+  });
+  
   return [];
 }
 
