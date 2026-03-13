@@ -299,13 +299,8 @@ export interface NBCDebugResult {
 //  4. bodyText truncation removed — full normalised body used for all regex passes.
 //  5. resolveSearchResult() is fully synchronous — no extra HTTP round-trip.
 //     getReviewFromDevicePage (was ~2–3s extra latency) removed entirely.
-//  6. searchViaNBC uses POST with TYPO3 tx_indexedsearch_pi2[search][sword].
-//     NBC's search is a TYPO3 Indexed Search form — GET ?word= is silently
-//     ignored and returns the bare search page with zero results.
-//     Fix: POST application/x-www-form-urlencoded to Search.8222.0.html.
+//  6. searchViaNBCSearch removed — SearXNG is the sole search path.
 //  7. scrapeNotebookCheckDevice() accepts optional AbortSignal.
-//  8. getNotebookCheckDataFast / searchNotebookCheck use NBC direct search
-//     as primary, SearXNG only as fallback (no longer bypass searchViaNBC).
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── AUTO-DERIVED CACHE VERSION ────────────────────────────────────────────────
@@ -738,80 +733,195 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 // ─────────────────────────────────────────────────────────────────────────────
 // SEARCH: NBC DIRECT — truly unlimited, zero external dependencies
 //
-// Queries NotebookCheck's own search endpoint directly via POST.
-// NBC uses TYPO3 Indexed Search — the form submits as POST with the parameter:
-//   tx_indexedsearch_pi2[search][sword]=<query>
-// A GET request with ?word= is silently ignored by TYPO3 and returns zero results.
+// HOW NBC SEARCH WORKS (TYPO3 Extbase Indexed Search):
+// ──────────────────────────────────────────────────────
+// NBC's search is powered by TYPO3 Extbase. Every form submission requires:
+//   • __trustedProperties  — HMAC of allowed field names, signed with the
+//                            server's private TYPO3 encryption key
+//   • __referrer[*]        — HMAC-signed referrer metadata
+//   • Several hidden fields (search[pointer], search[_sections], etc.)
 //
-// NBC's own search has no bot detection, no rate limiting, no cloud IP blocks.
-// It's your target site — querying it directly is the only truly unlimited approach.
+// These tokens are generated server-side when the form page is rendered.
+// They CANNOT be forged — attempting to POST without them returns:
+//   "Oops, an error occurred!" (TYPO3 HMAC validation failure, 3887 bytes)
+//
+// SOLUTION — two-step approach with aggressive caching:
+//   Step 1: GET Search.8222.0.html — extract all hidden form fields + cookies
+//           Cache result for 4 hours (tokens are stable across requests)
+//   Step 2: POST with extracted fields + search query
+//
+// The GET result (form tokens) is cached in memory so Step 1 only happens
+// once per server process (or once per 4h). After that, only the POST fires.
+// Net latency impact: ~0ms on warm cache, ~1s on cold start (once per 4h).
 // ─────────────────────────────────────────────────────────────────────────────
+const NBC_SEARCH_URL    = 'https://www.notebookcheck.net/Search.8222.0.html';
+const NBC_FORM_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+interface NBCFormTokens {
+  fields:  Record<string, string>; // all hidden <input> values from the form
+  cookies: string;                 // Cookie header to send with the POST
+  fetchedAt: number;
+}
+
+// Module-level cache — shared across all requests in this process.
+// Intentionally NOT in Redis: tokens are per-server (signed with server key).
+let _nbcFormTokenCache: NBCFormTokens | null = null;
+
+async function fetchNBCFormTokens(signal?: AbortSignal): Promise<NBCFormTokens | null> {
+  // Return cached tokens if still fresh
+  if (_nbcFormTokenCache && (Date.now() - _nbcFormTokenCache.fetchedAt) < NBC_FORM_CACHE_TTL) {
+    return _nbcFormTokenCache;
+  }
+
+  try {
+    const ua = randomUA();
+    const resp = await sharedAxios.get<string>(NBC_SEARCH_URL, {
+      headers: {
+        'User-Agent':      ua,
+        'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+      },
+      timeout: 8000,
+      decompress: true,
+      signal: signal as any,
+    });
+
+    // Collect cookies from the GET response
+    const rawCookies: string[] = (resp.headers['set-cookie'] as string[] | undefined) ?? [];
+    const cookies = rawCookies.map((c: string) => c.split(';')[0]).join('; ');
+
+    // Parse every hidden input from the search form
+    const $ = cheerio.load(typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data));
+    const fields: Record<string, string> = {};
+
+    // NBC uses both the old pi2 form and/or Fluid form — grab all hidden inputs
+    // inside any form that has an indexed-search-related action or id.
+    $('form').each((_, form) => {
+      const action = $(form).attr('action') || '';
+      const id     = $(form).attr('id') || '';
+      if (!action.includes('Search') && !id.includes('indexedsearch') && !id.includes('tx_indexedsearch')) return;
+      $(form).find('input[type="hidden"]').each((__, el) => {
+        const name  = $(el).attr('name');
+        const value = $(el).attr('value') ?? '';
+        if (name) fields[name] = value;
+      });
+    });
+
+    // If no form matched by ID/action, fall back to ALL hidden inputs on the page
+    // (NBC may render the form without a recognisable id)
+    if (Object.keys(fields).length === 0) {
+      $('input[type="hidden"]').each((_, el) => {
+        const name  = $(el).attr('name');
+        const value = $(el).attr('value') ?? '';
+        if (name) fields[name] = value;
+      });
+    }
+
+    const tokens: NBCFormTokens = { fields, cookies, fetchedAt: Date.now() };
+    _nbcFormTokenCache = tokens;
+
+    log('info', 'nbc.form_tokens.fetched', {
+      fieldCount: Object.keys(fields).length,
+      fieldNames: Object.keys(fields),
+      hasCookies: cookies.length > 0,
+    });
+
+    return tokens;
+  } catch (e: any) {
+    log('warn', 'nbc.form_tokens.fetch_failed', { err: e?.message });
+    return null;
+  }
+}
+
 async function searchViaNBC(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  const seen = new Set<string>();
+  const seen    = new Set<string>();
   const results: SearchResult[] = [];
 
+  // Fetch (or reuse cached) TYPO3 form tokens — required for POST to succeed
+  const tokens = await fetchNBCFormTokens(signal);
+  if (!tokens) {
+    log('warn', 'nbc.direct.search.no_tokens', { nq });
+    return [];
+  }
+
+  const parseLinks = ($: cheerio.CheerioAPI) => {
+    $('a[href]').each((_, el) => {
+      const href    = $(el).attr('href') || '';
+      const fullUrl = href.startsWith('http') ? href
+        : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+
+      if (!fullUrl.includes('notebookcheck.net')) return;
+      if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
+      if (seen.has(fullUrl)) return;
+      if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
+      if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
+
+      const text = norm($(el).text() || $(el).attr('title') || '');
+      if (!text || text.length < 3 || text.length > 300) return;
+
+      const sc = scoreCandidate(text, fullUrl, nq, oq);
+      if (sc < 0) return;
+      seen.add(fullUrl);
+      results.push({ url: fullUrl, title: text, score: sc });
+    });
+  };
+
   const tryQuery = async (q: string) => {
-    // NBC search is a TYPO3 Indexed Search — it uses POST, not GET.
-    // The GET ?word= parameter is silently ignored by TYPO3, returning the bare
-    // search page with zero results. The correct POST body field is:
-    //   tx_indexedsearch_pi2[search][sword]=<query>
-    const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
-    const postBody = new URLSearchParams({
+    // Build POST body: all form tokens + the search query
+    const postParams = new URLSearchParams({
+      ...tokens.fields,
       'tx_indexedsearch_pi2[search][sword]': q,
-      'tx_indexedsearch_pi2[action]': 'search',
-    }).toString();
+      'tx_indexedsearch_pi2[action]':        'search',
+      // Standard hidden fields required by TYPO3 indexed search
+      'tx_indexedsearch_pi2[search][_sections]':      tokens.fields['tx_indexedsearch_pi2[search][_sections]']      ?? '0',
+      'tx_indexedsearch_pi2[search][_freeIndexUid]':  tokens.fields['tx_indexedsearch_pi2[search][_freeIndexUid]']  ?? '_',
+      'tx_indexedsearch_pi2[search][pointer]':        tokens.fields['tx_indexedsearch_pi2[search][pointer]']        ?? '0',
+      'tx_indexedsearch_pi2[search][ext]':            tokens.fields['tx_indexedsearch_pi2[search][ext]']            ?? '0',
+      'tx_indexedsearch_pi2[search][searchType]':     tokens.fields['tx_indexedsearch_pi2[search][searchType]']     ?? '0',
+      'tx_indexedsearch_pi2[search][defaultOperand]': tokens.fields['tx_indexedsearch_pi2[search][defaultOperand]'] ?? 'AND',
+      'tx_indexedsearch_pi2[search][mediaType]':      tokens.fields['tx_indexedsearch_pi2[search][mediaType]']      ?? '0',
+      'tx_indexedsearch_pi2[search][sortOrder]':      tokens.fields['tx_indexedsearch_pi2[search][sortOrder]']      ?? '0',
+      'tx_indexedsearch_pi2[search][group]':          tokens.fields['tx_indexedsearch_pi2[search][group]']          ?? 'checked',
+      'tx_indexedsearch_pi2[search][desc]':           tokens.fields['tx_indexedsearch_pi2[search][desc]']           ?? '0',
+      'tx_indexedsearch_pi2[search][numberOfResults]':tokens.fields['tx_indexedsearch_pi2[search][numberOfResults]'] ?? '10',
+    });
 
     try {
-      const { data: htmlRaw } = await sharedAxios.post<string>(NBC_SEARCH_URL, postBody, {
+      const { data: htmlRaw } = await sharedAxios.post<string>(NBC_SEARCH_URL, postParams.toString(), {
         headers: {
-          'User-Agent':       randomUA(),
-          'Content-Type':     'application/x-www-form-urlencoded',
-          'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language':  'en-US,en;q=0.9',
-          'Accept-Encoding':  'gzip, deflate, br',
-          'Referer':          'https://www.notebookcheck.net/',
-          'Origin':           'https://www.notebookcheck.net',
+          'User-Agent':      randomUA(),
+          'Content-Type':    'application/x-www-form-urlencoded',
+          'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Referer':         NBC_SEARCH_URL,
+          'Origin':          'https://www.notebookcheck.net',
+          ...(tokens.cookies ? { 'Cookie': tokens.cookies } : {}),
         },
-        timeout: 6000,
+        timeout: 8000,
         maxRedirects: 3,
         decompress: true,
         signal: signal as any,
       });
+
       const html = typeof htmlRaw === 'string' ? htmlRaw : JSON.stringify(htmlRaw);
 
-      const $ = cheerio.load(html);
+      // If TYPO3 returned the error page (token mismatch), invalidate cache and bail
+      if (html.length < 10000 && html.includes('an error occurred')) {
+        log('warn', 'nbc.direct.search.hmac_error', { q, htmlLen: html.length });
+        _nbcFormTokenCache = null; // force re-fetch on next call
+        return;
+      }
 
-      $('a[href]').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        const fullUrl = href.startsWith('http') ? href
-          : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
-
-        if (!fullUrl.includes('notebookcheck.net')) return;
-        if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
-        if (seen.has(fullUrl)) return;
-        if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
-        if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
-
-        const text = norm($(el).text() || $(el).attr('title') || '');
-        if (!text || text.length < 3 || text.length > 300) return;
-
-        const sc = scoreCandidate(text, fullUrl, nq, oq);
-        if (sc < 0) return;
-        seen.add(fullUrl);
-        results.push({ url: fullUrl, title: text, score: sc });
-      });
+      parseLinks(cheerio.load(html));
     } catch (e: any) {
       log('warn', 'nbc.direct.search.failed', { q, err: e?.message });
     }
   };
 
-  // Primary: normalized query
   await tryQuery(nq);
-
-  // Fallback: original query if normalized returned nothing and they differ
-  if (results.length === 0 && nq !== oq) {
-    await tryQuery(oq);
-  }
+  if (results.length === 0 && nq !== oq) await tryQuery(oq);
 
   log('info', 'nbc.direct.search', { nq, count: results.length });
   return results;
@@ -3101,21 +3211,11 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
   // PERF: fire full-result cache check and SearXNG search in parallel.
   // On a cache miss the search has already been running while Redis was checked.
   const oq = query.trim(), nq = normalizeQuery(query);
-  // Fire cache check and NBC direct search in parallel.
-  // NBC direct search (POST) is the primary path — no external dependencies,
-  // no IP blocking, no SearXNG rate limits.
-  const [cached, nbcResults] = await Promise.all([
+  const [cached, searchResults] = await Promise.all([
     getCacheAs<NBCDeviceData | NBCError>(ck),
-    searchViaNBC(nq, oq),
+    searchViaSearXNG(nq, oq),
   ]);
   if (cached) { log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 }); return cached; }
-
-  // Fallback to SearXNG only if NBC direct search returned nothing
-  let searchResults = nbcResults;
-  if (!searchResults.length) {
-    log('info', 'search.fallback_to_searxng', { query: nq });
-    searchResults = await searchViaSearXNG(nq, oq);
-  }
 
   log('info', 'stage.search', { query, ms: Date.now() - t0, count: searchResults.length });
   if (!searchResults.length) return null;
@@ -3141,17 +3241,11 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
 export async function searchNotebookCheck(query: string): Promise<SearchResult[]> {
   const ck = `nbc:suggestions:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, nbcResults] = await Promise.all([
+  const [cached, results] = await Promise.all([
     getCacheAs<SearchResult[]>(ck),
-    searchViaNBC(nq, oq),
+    searchViaSearXNG(nq, oq),
   ]);
   if (cached) return cached;
-  // Fallback to SearXNG if NBC direct search returned nothing
-  let results = nbcResults;
-  if (!results.length) {
-    log('info', 'search.fallback_to_searxng', { query: nq });
-    results = await searchViaSearXNG(nq, oq);
-  }
   if (!results.length) return [];
   const sorted = results.sort((a, b) => b.score - a.score);
   setCache(ck, sorted);
@@ -3186,30 +3280,18 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
   const oq = query.trim(), nq = normalizeQuery(query);
 
   // Stage 0: mem-only cache check (instant — no Redis HTTP call in debug)
+  // Redis latency (~500-700ms cold TLS) would skew the timing numbers.
+  // The hot path uses Redis but we time them separately here for clarity.
   const fullCk = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const memCached = memGet(fullCk) as NBCDeviceData | null;
   const cacheHit = memCached !== null;
 
-  // Stage 1: NBC direct search (POST) — primary path, always timed
+  // Stage 1: SearXNG search — run unconditionally so timing is always shown
   const ts = Date.now();
-  let results = await searchViaNBC(nq, oq);
-  const nbcSearchMs = Date.now() - ts;
-  const nbcResults = [...results];
+  const results = await searchViaSearXNG(nq, oq);
+  const searchMs = Date.now() - ts;
 
-  // Stage 1b: SearXNG fallback — only if NBC returned nothing
-  let searxngResults: SearchResult[] = [];
-  let searxngMs = 0;
-  if (!results.length) {
-    const tss = Date.now();
-    searxngResults = await searchViaSearXNG(nq, oq);
-    searxngMs = Date.now() - tss;
-    results = searxngResults;
-    log('info', 'debug.fallback_to_searxng', { query: nq, nbcCount: 0 });
-  }
-
-  const searchMs = nbcSearchMs + searxngMs;
-
-  // Stage 2: Redis check (timed separately)
+  // Stage 2: Redis check (timed separately so you can see its cost)
   const tr = Date.now();
   const redisCached = !cacheHit ? await getCacheAs<NBCDeviceData>(fullCk) : null;
   const redisMs = Date.now() - tr;
@@ -3241,9 +3323,9 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
       cacheHit:  cacheHit || redisHit,
       memHit:    cacheHit,
       redisHit,
-      redisMs,
-      searchMs,
-      scrapeMs,
+      redisMs,    // how long Redis GET took — watch for >200ms (cold TLS)
+      searchMs,   // SearXNG round-trip
+      scrapeMs,   // NBC page fetch + parse
       totalMs,
     },
     elapsedMs: totalMs,
@@ -3251,10 +3333,7 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
     scrapeOk,
     ...(scrapeError ? { scrapeError } : {}),
     strategies: {
-      nbc_direct: { count: nbcResults.length, top5: nbcResults.slice(0, 5) },
-      ...(searxngResults.length > 0 || !nbcResults.length
-        ? { searxng: { count: searxngResults.length, top5: searxngResults.slice(0, 5) } }
-        : {}),
+      searxng: { count: results.length, top5: results.slice(0, 5) },
     },
   };
 }

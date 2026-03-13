@@ -348,6 +348,11 @@ setTimeout(() => warmProcCache().catch(() => {}), 5000); // 5s delay — let ser
 // Shows exactly what NBC's own search returns — raw HTML links, scoring, timing.
 // Use this to verify NBC direct search is working before relying on it.
 // Example: /api/nbc/direct-debug?q=vivo+x300
+//
+// HOW IT WORKS:
+//   Step 1 — GET Search.8222.0.html: extract TYPO3 HMAC tokens + cookies.
+//             These are required; posting without them → "an error occurred".
+//   Step 2 — POST with all hidden fields + tx_indexedsearch_pi2[search][sword].
 app.get('/api/nbc/direct-debug', async (req, res) => {
   const q = (req.query.q as string) || 'vivo x300';
   const t0 = Date.now();
@@ -360,97 +365,108 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     const oq = q.trim();
     const nq = normalizeQuery(q);
     const primaryQuery = nq !== oq ? nq : oq;
-
-    // Hit NBC search directly via POST — NBC uses TYPO3 Indexed Search.
-    // GET ?word= is silently ignored by TYPO3; the correct field is
-    // tx_indexedsearch_pi2[search][sword] submitted as POST form data.
     const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
-    const postBody = new URLSearchParams({
-      'tx_indexedsearch_pi2[search][sword]': primaryQuery,
-      'tx_indexedsearch_pi2[action]': 'search',
-    }).toString();
-    const searchUrl = NBC_SEARCH_URL; // for the response payload (method is POST)
-    const fetchMs0 = Date.now();
-    let html = '';
-    let fetchError = '';
-    let httpStatus = 0;
+    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+    // ── Step 1: GET the form page to extract TYPO3 HMAC tokens ───────────────
+    const tGet = Date.now();
+    let getStatus = 0, getError = '', cookies = '', formFields: Record<string, string> = {};
     try {
-      const resp = await axios.post(NBC_SEARCH_URL, postBody, {
+      const getResp = await axios.get(NBC_SEARCH_URL, {
+        headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', },
+        timeout: 8000,
+      });
+      getStatus = getResp.status;
+      // Collect session cookies
+      const rawCookies: string[] = (getResp.headers['set-cookie'] as string[] | undefined) ?? [];
+      cookies = rawCookies.map((c: string) => c.split(';')[0]).join('; ');
+      // Extract all hidden form inputs — TYPO3 puts __trustedProperties etc. in there
+      const $g = cheerio.load(typeof getResp.data === 'string' ? getResp.data : '');
+      $g('input[type="hidden"]').each((_: any, el: any) => {
+        const name = $g(el).attr('name');
+        const val  = $g(el).attr('value') ?? '';
+        if (name) formFields[name] = val;
+      });
+    } catch (e: any) {
+      getError = e?.message;
+      getStatus = e?.response?.status || 0;
+    }
+    const getMs = Date.now() - tGet;
+
+    // ── Step 2: POST with tokens + search query ───────────────────────────────
+    const tPost = Date.now();
+    let html = '', postStatus = 0, postError = '';
+    const postBody = new URLSearchParams({
+      ...formFields,
+      'tx_indexedsearch_pi2[search][sword]':         primaryQuery,
+      'tx_indexedsearch_pi2[action]':                'search',
+      'tx_indexedsearch_pi2[search][_sections]':      formFields['tx_indexedsearch_pi2[search][_sections]']      ?? '0',
+      'tx_indexedsearch_pi2[search][_freeIndexUid]':  formFields['tx_indexedsearch_pi2[search][_freeIndexUid]']  ?? '_',
+      'tx_indexedsearch_pi2[search][pointer]':        formFields['tx_indexedsearch_pi2[search][pointer]']        ?? '0',
+      'tx_indexedsearch_pi2[search][ext]':            formFields['tx_indexedsearch_pi2[search][ext]']            ?? '0',
+      'tx_indexedsearch_pi2[search][searchType]':     formFields['tx_indexedsearch_pi2[search][searchType]']     ?? '0',
+      'tx_indexedsearch_pi2[search][defaultOperand]': formFields['tx_indexedsearch_pi2[search][defaultOperand]'] ?? 'AND',
+      'tx_indexedsearch_pi2[search][mediaType]':      formFields['tx_indexedsearch_pi2[search][mediaType]']      ?? '0',
+      'tx_indexedsearch_pi2[search][sortOrder]':      formFields['tx_indexedsearch_pi2[search][sortOrder]']      ?? '0',
+      'tx_indexedsearch_pi2[search][group]':          formFields['tx_indexedsearch_pi2[search][group]']          ?? 'checked',
+      'tx_indexedsearch_pi2[search][desc]':           formFields['tx_indexedsearch_pi2[search][desc]']           ?? '0',
+      'tx_indexedsearch_pi2[search][numberOfResults]':formFields['tx_indexedsearch_pi2[search][numberOfResults]'] ?? '10',
+    });
+    try {
+      const postResp = await axios.post(NBC_SEARCH_URL, postBody.toString(), {
         headers: {
-          'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'User-Agent':      UA,
           'Content-Type':    'application/x-www-form-urlencoded',
           'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.9',
-          'Referer':         'https://www.notebookcheck.net/',
+          'Referer':         NBC_SEARCH_URL,
           'Origin':          'https://www.notebookcheck.net',
+          ...(cookies ? { 'Cookie': cookies } : {}),
         },
         timeout: 8000,
       });
-      html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-      httpStatus = resp.status;
+      html = typeof postResp.data === 'string' ? postResp.data : JSON.stringify(postResp.data);
+      postStatus = postResp.status;
     } catch (e: any) {
-      fetchError = e?.message;
-      httpStatus = e?.response?.status || 0;
+      postError = e?.message;
+      postStatus = e?.response?.status || 0;
     }
+    const postMs = Date.now() - tPost;
 
-    const fetchMs = Date.now() - fetchMs0;
-
-    // Parse all links from the response
+    // ── Parse links from POST response ────────────────────────────────────────
     const allLinks: any[] = [];
     const articleLinks: any[] = [];
+    const isErrorPage = html.length < 10000 && html.includes('an error occurred');
 
-    if (html) {
+    if (html && !isErrorPage) {
       const $ = cheerio.load(html);
       $('a[href]').each((_: any, el: any) => {
         const href = $(el).attr('href') || '';
         const fullUrl = href.startsWith('http') ? href
           : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
         const text = $(el).text().trim();
-
         if (!fullUrl.includes('notebookcheck.net')) return;
-
-        // Show ALL NBC links — even ones that fail the article-ID filter
         allLinks.push({ url: fullUrl, text: text.slice(0, 80) });
-
-        // Article links: must have 4+ digit article ID in URL
         if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
         if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
         if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
         if (!text || text.length < 3) return;
-
-        // Simple keyword match — does the URL/title contain query words?
         const qWords = primaryQuery.toLowerCase().split(/\s+/).filter((w: string) => w.length > 1);
         const combined = (text + ' ' + fullUrl).toLowerCase();
         const matchCount = qWords.filter((w: string) => combined.includes(w)).length;
         const isReview = /review|smartphone-review/.test(fullUrl);
-
-        articleLinks.push({
-          url: fullUrl,
-          title: text.slice(0, 120),
-          matchedWords: matchCount,
-          totalWords: qWords.length,
-          isReview,
-          wouldBeUsed: matchCount >= Math.ceil(qWords.length / 2),
-        });
+        articleLinks.push({ url: fullUrl, title: text.slice(0, 120), matchedWords: matchCount, totalWords: qWords.length, isReview, wouldBeUsed: matchCount >= Math.ceil(qWords.length / 2) });
       });
     }
-
     articleLinks.sort((a: any, b: any) => (b.matchedWords - a.matchedWords) || (b.isReview ? 1 : -1));
 
     return res.json({
       query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
-      searchUrl,
-      searchMethod: 'POST',
-      searchBody: postBody,
-      httpStatus,
-      fetchError: fetchError || null,
-      fetchMs,
+      // Step 1 diagnostics
+      step1_get: { url: NBC_SEARCH_URL, status: getStatus, ms: getMs, error: getError || null, formFieldsExtracted: Object.keys(formFields), hasCookies: cookies.length > 0, hasHmacToken: '__trustedProperties' in formFields || Object.keys(formFields).some(k => k.includes('trusted') || k.includes('referrer') || k.includes('hmac')) },
+      // Step 2 diagnostics
+      step2_post: { url: NBC_SEARCH_URL, method: 'POST', status: postStatus, ms: postMs, error: postError || null, isErrorPage, htmlLength: html.length, htmlSnippet: html.slice(0, 300) },
       totalMs: Date.now() - t0,
-      html: {
-        length: html.length,
-        snippet: html.slice(0, 300),   // first 300 chars — shows if it's the right page
-      },
       allNBCLinks: allLinks.slice(0, 20),
       articleLinks: articleLinks.slice(0, 10),
       winner: articleLinks.find((l: any) => l.wouldBeUsed) || null,
