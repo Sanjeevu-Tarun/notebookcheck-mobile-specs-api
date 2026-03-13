@@ -1815,7 +1815,8 @@ async function doResolve() {
   try {
     const r = await fetch('/api/index/recover-review-urls');
     const d = await r.json();
-    document.getElementById('postmsg').textContent = `resolved: ${d.recovered || 0} new review URLs found`;
+    // FIXED
+document.getElementById('postmsg').textContent = \`resolved: \${d.recovered || 0} new review URLs found\`;
   } catch(e) { document.getElementById('postmsg').textContent = 'resolve error: ' + e.message; }
   btn.disabled = false;
 }
