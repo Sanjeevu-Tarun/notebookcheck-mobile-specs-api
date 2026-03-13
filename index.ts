@@ -852,6 +852,7 @@ app.get('/api/index/crawl-debug', async (req, res) => {
       // Extract ALL links matching the NBC article pattern
       const allLinks: string[] = [];
       const reviewLinks: string[] = [];
+      const phoneLinks: string[] = [];
       $('a[href]').each((_: any, el: any) => {
         let href = $(el).attr('href') || '';
         if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -861,6 +862,7 @@ app.get('/api/index/crawl-debug', async (req, res) => {
         allLinks.push(href);
         const slug = href.split('/').pop() || '';
         if (/review|smartphone|phone/i.test(slug)) reviewLinks.push(href);
+        if (/smartphone|phone/i.test(slug)) phoneLinks.push(href);
       });
 
       // Pagination links
@@ -877,13 +879,18 @@ app.get('/api/index/crawl-debug', async (req, res) => {
         htmlLength: html.length,
         allArticleLinks: allLinks.length,
         reviewLinks: reviewLinks.length,
-        sampleReviewLinks: reviewLinks.slice(0, 5),
+        phoneOnlyLinks: phoneLinks.length,
+        note: phoneLinks.length < reviewLinks.length
+          ? `${reviewLinks.length - phoneLinks.length} non-phone reviews filtered out (laptops/headphones/etc)`
+          : 'all review links are phones',
+        samplePhoneLinks: phoneLinks.slice(0, 5),
+        sampleNonPhoneLinks: reviewLinks.filter(u => !phoneLinks.includes(u)).slice(0, 3),
         paginationLinks: [...new Set(pageLinks)].slice(0, 5),
         htmlSnippet: req.query.raw === 'true' ? html.slice(0, 3000) : undefined,
       });
 
-      // Stop after first successful URL with results
-      if (reviewLinks.length > 0) break;
+      // Stop after first successful URL with phone results
+      if (phoneLinks.length > 0) break;
 
     } catch (e: any) {
       results.push({
@@ -895,11 +902,11 @@ app.get('/api/index/crawl-debug', async (req, res) => {
     }
   }
 
-  const winner = results.find(r => (r.reviewLinks || 0) > 0);
+  const winner = results.find(r => (r.phoneOnlyLinks || r.reviewLinks || 0) > 0);
   return res.json({
     success: !!winner,
     diagnosis: winner
-      ? `Found ${winner.reviewLinks} review links at ${winner.url}`
+      ? `Found ${winner.phoneOnlyLinks ?? winner.reviewLinks} phone review links at ${winner.url}`
       : '❌ No review links found on any URL — check if your server can reach notebookcheck.net',
     winner: winner || null,
     allResults: results,

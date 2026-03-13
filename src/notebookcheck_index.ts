@@ -230,10 +230,12 @@ function extractReviewUrls(html: string): Array<{ url: string; title: string }> 
     // Reject clearly non-review content
     if (/users?[-_]complain|rumou?r|leaked?|price[-_]drop|hands?[-_]on(?!.*review)|first[-_]look|unboxing|teardown|external[-_]review/i.test(slug)) return;
 
-    // Must contain review OR smartphone OR phone in the slug
-    // NBC slugs: "Samsung-Galaxy-S25-Ultra-smartphone-review.1234567.0.html"
-    //            "Google-Pixel-10-Pro-XL-Powerful-smartphone-with-weak-heart.1128379.0.html"
-    if (!/review|smartphone|phone/i.test(slug)) return;
+    // NBC smartphone review URLs ALWAYS contain "smartphone" or "phone" in the slug
+    // e.g. "Samsung-Galaxy-S25-Ultra-smartphone-review.1234567.0.html"
+    //      "Google-Pixel-10-Pro-XL-Powerful-smartphone-with-weak-heart.1128379.0.html"
+    //      "Apple-iPhone-17-Pro-review.9876543.0.html"  ← "phone" covers iPhones
+    // Non-phones like laptops/headphones/vacuums never have "smartphone"/"phone" in slug
+    if (!/smartphone|phone/i.test(slug)) return;
 
     const key = href.toLowerCase();
     if (seen.has(key)) return;
@@ -263,7 +265,8 @@ function detectTotalPages(html: string): number {
 
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
-    const pageMatch = href.match(/[?&]page=(\d+)/);
+    // NBC uses ns_page= for pagination
+    const pageMatch = href.match(/ns_page=(\d+)/) || href.match(/[?&]page=(\d+)/);
     if (pageMatch) {
       const p = parseInt(pageMatch[1]);
       if (p > maxPage) maxPage = p;
@@ -271,20 +274,10 @@ function detectTotalPages(html: string): number {
   });
 
   // Also check pagination text elements
-  $('[class*="pager"], [class*="pagination"], .page-numbers').find('a, span').each((_, el) => {
+  $('[class*="pager"], [class*="pagination"], .page-numbers, [class*="tx-indexedsearch"]').find('a, span').each((_, el) => {
     const t = $(el).text().trim();
     const n = parseInt(t);
-    if (!isNaN(n) && n > maxPage) maxPage = n;
-  });
-
-  // Fallback: look for "Next" with high page number
-  $('a').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    const m = href.match(/page=(\d+)/);
-    if (m) {
-      const p = parseInt(m[1]);
-      if (p > maxPage) maxPage = p;
-    }
+    if (!isNaN(n) && n > maxPage && n < 500) maxPage = n;
   });
 
   log('debug', 'index.pagination', { maxPage });
@@ -338,9 +331,11 @@ async function saveIndexToRedis(): Promise<void> {
 //   Format A: https://www.notebookcheck.net/Reviews.55.0.html?cat=Smartphones&page=N
 //   Format B: https://www.notebookcheck.net/Smartphones.1311.0.html  (direct category page)
 // We try Format A first; if it returns 0 results we fall back to Format B.
-const NBC_REVIEWS_BASE_A = 'https://www.notebookcheck.net/Reviews.55.0.html';
-const NBC_REVIEWS_BASE_B = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
-const NBC_REVIEWS_BASE   = NBC_REVIEWS_BASE_A; // default, overridden in crawl if needed
+// NBC uses ns_page= for pagination (not page=) — discovered from live response
+// The dedicated smartphone reviews category page is the correct starting point
+const NBC_REVIEWS_BASE_A = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
+const NBC_REVIEWS_BASE_B = 'https://www.notebookcheck.net/Reviews.55.0.html';
+const NBC_REVIEWS_BASE   = NBC_REVIEWS_BASE_A;
 
 export interface CrawlOptions {
   maxPages?:       number;   // cap at N pages (default: unlimited)
@@ -377,7 +372,8 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
 
   try {
     // ── STEP 1: Fetch page 1 to determine total page count ──────────────────
-    // Try Format A (?cat=Smartphones), fall back to Format B (direct category page)
+    // NBC Reviews listing — cat=Smartphones is ignored by NBC but kept for consistency
+    // Real phone filtering is done by slug pattern (smartphone|phone in URL)
     let firstPageUrl = `${NBC_REVIEWS_BASE_A}?cat=Smartphones`;
     let useBaseB = false;
     log('info', 'index.fetch_page', { page: 1, url: firstPageUrl });
@@ -385,7 +381,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     let firstHtml = await fetchPage(firstPageUrl);
     let page1Entries = extractReviewUrls(firstHtml);
 
-    // If Format A returned nothing, try Format B (direct category page)
+    // Fallback to direct Reviews page if needed
     if (page1Entries.length === 0) {
       log('info', 'index.try_format_b', { reason: 'Format A returned 0 results' });
       firstPageUrl = NBC_REVIEWS_BASE_B;
@@ -421,7 +417,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     for (let page = 2; page <= pagesToFetch; page++) {
       await new Promise(r => setTimeout(r, delayMs));
 
-      const pageUrl = useBaseB ? `${NBC_REVIEWS_BASE_B}?page=${page}` : `${NBC_REVIEWS_BASE_A}?cat=Smartphones&page=${page}`;
+      const pageUrl = `${NBC_REVIEWS_BASE_A}?cat=Smartphones&ns_page=${page}`;
       log('info', 'index.fetch_page', { page, url: pageUrl });
 
       try {
