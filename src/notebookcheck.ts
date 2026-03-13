@@ -731,8 +731,72 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEARCH: SearXNG
-// Circuit breaker prevents hammering the instance when it is consistently down.
+// SEARCH: NBC DIRECT — truly unlimited, zero external dependencies
+//
+// Queries NotebookCheck's own search endpoint directly.
+// NBC's own search has no bot detection, no rate limiting, no cloud IP blocks.
+// It's your target site — querying it directly is the only truly unlimited approach.
+//
+// NBC search URL: https://www.notebookcheck.net/Search.8222.0.html?word=<query>
+// NBC smartphones listing: https://www.notebookcheck.net/Smartphones.8.0.html
+// Both return HTML with review links — parsed with cheerio.
+// ─────────────────────────────────────────────────────────────────────────────
+async function searchViaNBC(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
+  const seen = new Set<string>();
+  const results: SearchResult[] = [];
+
+  const tryQuery = async (q: string) => {
+    // Correct NBC search URL — Search.8222.0.html, NOT Search.html (that 404s)
+    const url = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(q)}`;
+    try {
+      const html = await fetchUrl(url, 6000, {
+        'Referer': 'https://www.notebookcheck.net/',
+        'Accept': 'text/html,application/xhtml+xml',
+      }, 0, signal);
+
+      const $ = cheerio.load(html);
+
+      $('a[href]').each((_, el) => {
+        const href = $(el).attr('href') || '';
+        const fullUrl = href.startsWith('http') ? href
+          : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+
+        if (!fullUrl.includes('notebookcheck.net')) return;
+        if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
+        if (seen.has(fullUrl)) return;
+        if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
+        if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
+
+        const text = norm($(el).text() || $(el).attr('title') || '');
+        if (!text || text.length < 3 || text.length > 300) return;
+
+        const sc = scoreCandidate(text, fullUrl, nq, oq);
+        if (sc < 0) return;
+        seen.add(fullUrl);
+        results.push({ url: fullUrl, title: text, score: sc });
+      });
+    } catch (e: any) {
+      log('warn', 'nbc.direct.search.failed', { q, err: e?.message });
+    }
+  };
+
+  // Primary: normalized query
+  await tryQuery(nq);
+
+  // Fallback: original query if normalized returned nothing and they differ
+  if (results.length === 0 && nq !== oq) {
+    await tryQuery(oq);
+  }
+
+  log('info', 'nbc.direct.search', { nq, count: results.length });
+  return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEARCH: SearXNG — kept as secondary fallback only
+// NOTE: All major search engines (Google, Bing, DDG) block cloud IPs after
+// a few requests. SearXNG itself is unlimited but its backends are not.
+// Use NBC direct search above as the primary path — it has no such limits.
 // ─────────────────────────────────────────────────────────────────────────────
 export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const seen = new Set<string>();
@@ -757,11 +821,12 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     const searchUrl = `${base}/search`;
     // FIX: removed `engines` param — was hardcoded to 'google,bing,duckduckgo',
     // overriding settings.yml. Bing+DDG block Render IPs → 4.5s timeouts → null results.
-    // Let settings.yml decide (Google only).
+    // Force Google only — Bing/DDG block cloud IPs, causing full request_timeout delays.
     const params = { 
       q: `site:notebookcheck.net ${q} review`, 
       format: 'json', 
-      categories: 'general' 
+      categories: 'general',
+      engines: 'google',    
     };
     
     debugLog.push({ step: 'request', base, query: q, fullQuery: params.q });
@@ -978,11 +1043,19 @@ export function resolveSearchResult(
 async function searchNBC(query: string): Promise<{ name: string; url: string } | null> {
   const ck = `nbc:search:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  // FIX: was Promise.all([cache, searxng]) — always fired SearXNG even on cache hits.
-  // Now cache-first: only call SearXNG on a miss.
+
   const cached = await getCacheAs<{ name: string; url: string }>(ck);
   if (cached) return cached;
-  const results = await searchViaSearXNG(nq, oq);
+
+  // Primary: NBC's own search — truly unlimited, no IP blocking
+  let results = await searchViaNBC(nq, oq);
+
+  // Fallback: SearXNG (may be blocked after a few requests on cloud IPs)
+  if (!results.length) {
+    log('info', 'search.fallback_to_searxng', { query: nq });
+    results = await searchViaSearXNG(nq, oq);
+  }
+
   if (!results.length) return null;
   return resolveSearchResult(results, nq, oq, ck);
 }
