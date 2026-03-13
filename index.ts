@@ -39,7 +39,7 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v4-177
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
-// Uses Brave + SearXNG search, guaranteed <5s response
+// Uses Brave + SearXNG search, guaranteed <5seconds response
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
   const q = req.query.q as string;
@@ -921,6 +921,7 @@ app.get('/api/debug/redis-force-unlock', async (req, res) => {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
+<<<<<<< HEAD
 
 // /api/debug/crawl-direct — bypass all lock logic, crawl page 1 directly
 app.get('/api/debug/crawl-direct', async (req, res) => {
@@ -954,3 +955,5 @@ app.get('/api/debug/crawl-direct', async (req, res) => {
     return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 500) });
   }
 });
+=======
+>>>>>>> 33b75c7d5bdbb2e162fb7260bc75bebb9e4677a5
