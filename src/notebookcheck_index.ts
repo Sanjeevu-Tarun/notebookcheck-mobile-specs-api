@@ -208,11 +208,12 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
 
     const slug = href.split('/').pop() || '';
     // Skip known listing/navigation pages
-    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Series|Comparison)\./i.test(slug)) return;
+    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison)\./i.test(slug)) return;
+    if (/-Series\./i.test(slug)) return; // exclude series overview pages (e.g. Xiaomi-17-Series.1176125.0.html)
 
     // Exclude laptops, CPU/GPU analyses and non-phone hardware immediately
     // Tablets: -Pad-, Galaxy-Tab, iPad, MatePad, MediaPad, -Tab-, Lenovo Tab, etc.
-    const tabletSlug = /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|lenovo[-_]tab|honor[-_]pad|xiaomi[-_]pad|realme[-_]pad|oppo[-_]pad|oneplus[-_]pad|iqoo[-_]pad|tcl[-_]tab|nokia[-_]tab/i.test(slug);
+    const tabletSlug = /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|magicpad|lenovo[-_]tab|honor[-_]pad|xiaomi[-_]pad|realme[-_]pad|oppo[-_]pad|oneplus[-_]pad|iqoo[-_]pad|tcl[-_]tab|nokia[-_]tab/i.test(slug);
     const notAPhone = tabletSlug || /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
     if (notAPhone) return;
 

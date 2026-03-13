@@ -896,7 +896,8 @@ app.get('/api/index/library-debug', async (req, res) => {
         allSlugs.push(href.split('/').pop() || '');
       }
     });
-    const tabletSlugs = allSlugs.filter(s => /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad/i.test(s));
+    const tabletSlugs = allSlugs.filter(s => /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|magicpad/i.test(s));
+    const seriesSlugs = allSlugs.filter(s => /-Series\./i.test(s));
     return res.json({
       success: phones.length > 0,
       page, url, fetchMs: Date.now() - t0,
@@ -905,9 +906,11 @@ app.get('/api/index/library-debug', async (req, res) => {
       aggregatorPages: aggregatorUrls.length,
       reviewPages: reviewUrls.length,
       tabletsFiltered: tabletSlugs.length,
+      seriesFiltered: seriesSlugs.length,
       sampleAggregator: aggregatorUrls.slice(0, 5).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
       sampleReviews:    reviewUrls.slice(0, 3).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
       sampleTabletsFiltered: tabletSlugs.slice(0, 3),
+      sampleSeriesFiltered: seriesSlugs.slice(0, 3),
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
