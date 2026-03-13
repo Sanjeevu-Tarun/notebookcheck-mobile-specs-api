@@ -922,7 +922,7 @@ app.get('/migrate', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Migration — Upgrade to Review URLs<\/title>
+  <title>NBC Migration — Upgrade to Review URLs${String.fromCharCode(60)}/title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
@@ -1032,7 +1032,7 @@ app.get('/migrate', (req, res) => {
       running = false;
     }
   }
-<\/script>
+${String.fromCharCode(60)}/script>
 <\/body>
 <\/html>`);
 });
@@ -1044,7 +1044,7 @@ app.get('/recover', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Full Re-crawl<\/title>
+  <title>NBC Full Re-crawl${String.fromCharCode(60)}/title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
@@ -1208,7 +1208,7 @@ app.get('/recover', (req, res) => {
     }
     setBtns(false); running = false;
   }
-<\/script>
+${String.fromCharCode(60)}/script>
 <\/body>
 <\/html>\`);
 });
@@ -1364,7 +1364,7 @@ app.get('/crawler', (_, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NBC Crawler<\/title>
+<title>NBC Crawler${String.fromCharCode(60)}/title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
   :root{--bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;--accent:#00ff87;--accent2:#0ff;--danger:#ff4d6d;--warn:#ffd166;--text:#e0e0f0;--muted:#555570}
@@ -1434,7 +1434,7 @@ app.get('/crawler', (_, res) => {
   async function unlock(){log('Unlocking...','warn');try{const r=await fetch('/api/debug/redis-force-unlock'),d=await r.json();log(d.hint?.includes('✅')?'✅ Lock cleared':'Lock: '+JSON.stringify(d),d.hint?.includes('✅')?'ok':'warn')}catch(e){log('Unlock failed: '+e.message,'err')}}
   async function startCrawl(){if(running)return;running=true;stopRequested=false;startTime=Date.now();currentPage=1;document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').style.display='inline-block';setStatus('Crawling...',true);elapsedTimer=setInterval(()=>{const s=Math.round((Date.now()-startTime)/1000);document.getElementById('statElapsed').textContent=s+'s';document.getElementById('statElapsed').className='stat-value'},1000);try{await fetch('/api/debug/redis-force-unlock');log('🔓 Lock cleared','ok')}catch{}log('Starting crawl...','info');while(!stopRequested){try{document.getElementById('cardPages').classList.add('active');const resp=await fetch(\`/api/index/crawl-page?page=\${currentPage}\`);if(!resp.ok){log(\`Page \${currentPage} HTTP \${resp.status}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const data=await resp.json();if(!data.success){log(\`Page \${currentPage}: \${data.error||'error'}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const result=data.result;totalPages++;totalUrls=result.totalUrls;totalNew+=result.newUrls;updateStats();const pct=Math.min(Math.round(currentPage/150*100),99);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('progressPct').textContent=pct+'%';document.getElementById('progressLabel').textContent=\`Page \${currentPage} crawled\`;log(\`Page \${currentPage} → \${result.phonesFound} phones, \${result.newUrls} new (total: \${result.totalUrls})\`,result.newUrls>0?'ok':'info');if(result.done){log(\`🎉 Done! \${totalUrls} URLs indexed across \${totalPages} pages.\`,'done');document.getElementById('progressFill').style.width='100%';document.getElementById('progressPct').textContent='100%';document.getElementById('progressLabel').textContent='Crawl complete!';break}currentPage++;await new Promise(r=>setTimeout(r,800))}catch(e){log(\`Page \${currentPage} failed: \${e.message}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,3000));currentPage++}}if(stopRequested)log(\`⏹ Stopped at page \${currentPage}. \${totalUrls} URLs so far.\`,'warn');running=false;clearInterval(elapsedTimer);document.getElementById('btnStart').disabled=false;document.getElementById('btnStart').textContent='▶ Resume';document.getElementById('btnStop').style.display='none';document.getElementById('cardPages').classList.remove('active');setStatus('Done',false)}
   function stopCrawl(){stopRequested=true;setStatus('Stopping...',false);log('Stop requested...','warn')}
-<\/script>
+${String.fromCharCode(60)}/script>
 <\/body>
 <\/html>`);
 });
