@@ -16,6 +16,7 @@ import {
 import {
   crawlSync,
   crawlOnePage,
+  crawlReviewsPage,
   getQueueStats,
   getIndexEntries,
   scrapeIndexedDevice,
@@ -710,7 +711,7 @@ app.get('/api/index/crawl', async (req, res) => {
   }
 });
 
-// /api/index/crawl-page — crawl exactly one page (for client-chaining or cron)
+// /api/index/crawl-page — crawl exactly one chrono/library page (SOURCE B)
 // ?page=1
 app.get('/api/index/crawl-page', async (req, res) => {
   const page = parseInt(req.query.page as string || '1');
@@ -720,6 +721,23 @@ app.get('/api/index/crawl-page', async (req, res) => {
     rebuildSearchIndex().catch(() => {}); // fire and forget
     return res.json({ success: true, result,
       hint: result.done ? 'No more pages — crawl complete' : `Call ?page=${result.nextPage} for next page` });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/crawl-reviews-page — crawl exactly one NBC reviews listing page (SOURCE A)
+// SOURCE A = https://www.notebookcheck.net/Smartphones.155.0.html?p=N
+// These have "-review-" in their slug and contain full benchmarks/specs/images.
+// ?page=1
+app.get('/api/index/crawl-reviews-page', async (req, res) => {
+  const page = parseInt(req.query.page as string || '1');
+  try {
+    const { crawlReviewsPage } = await import('./src/notebookcheck_index');
+    const result = await crawlReviewsPage(page);
+    rebuildSearchIndex().catch(() => {}); // fire and forget
+    return res.json({ success: true, result,
+      hint: result.done ? 'No more review pages — SOURCE A complete' : `Call ?page=${result.nextPage} for next page` });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -1382,6 +1400,305 @@ app.get('/api/debug/crawl-direct', async (req, res) => {
 });
 
 // /crawler — self-hosted auto-crawler UI
+// /recrawl — two-panel crawl control UI (Source A reviews + Source B chrono)
+// Flush Redis → crawl Source A (review listing, ~80 pages) → crawl Source B (chrono library)
+// → purge library dupes → rebuild search index
+app.get('/recrawl', (_, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>NBC Recrawl</title>
+<style>
+  :root{--bg:#0d0d12;--surface:#14141c;--surface2:#1a1a24;--border:#252535;--green:#00d97e;--blue:#3b9eff;--red:#ff4d6d;--amber:#ffb627;--text:#d8d8ee;--muted:#5a5a78}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;min-height:100vh;padding:2rem;font-size:14px}
+  h1{font-size:1.6rem;font-weight:700;color:#fff;margin-bottom:0.25rem;letter-spacing:-0.02em}
+  .sub{font-size:12px;color:var(--muted);margin-bottom:1.75rem}
+  .flush-bar{display:flex;align-items:center;gap:10px;padding:14px 18px;background:var(--surface);border:1px solid #3a1520;border-radius:10px;margin-bottom:1.5rem}
+  .flush-bar p{flex:1;font-size:12px;color:var(--muted);line-height:1.5}
+  .flush-bar strong{display:block;font-size:13px;color:#ff7a8a;font-weight:600;margin-bottom:3px}
+  .panels{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+  .panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
+  .panel-head{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#fff}
+  .tag{font-size:10px;font-weight:600;padding:2px 8px;border-radius:20px;letter-spacing:0.04em}
+  .tag-a{background:#0c2e1a;color:var(--green)}
+  .tag-b{background:#0c1e35;color:var(--blue)}
+  .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--border)}
+  .dot.run{background:var(--green);box-shadow:0 0 6px var(--green);animation:blink 1s ease infinite}
+  .dot.done{background:var(--green)}
+  .dot.err{background:var(--red)}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0.25}}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .metric{background:var(--surface2);border-radius:7px;padding:8px 10px;text-align:center}
+  .metric-val{font-size:19px;font-weight:700;color:#fff;font-variant-numeric:tabular-nums}
+  .metric-lbl{font-size:10px;color:var(--muted);margin-top:1px;letter-spacing:0.03em}
+  .bar-wrap{display:flex;flex-direction:column;gap:4px}
+  .bar-track{height:5px;background:var(--border);border-radius:3px;overflow:hidden}
+  .bar-fill{height:100%;width:0%;border-radius:3px;transition:width 0.5s ease}
+  .bar-fill-a{background:var(--green)}
+  .bar-fill-b{background:var(--blue)}
+  .bar-fill-flush{background:var(--red)}
+  .bar-info{display:flex;justify-content:space-between;font-size:11px;color:var(--muted)}
+  .ctl{display:flex;align-items:center;gap:8px}
+  .ctl label{font-size:11px;color:var(--muted)}
+  .ctl input[type=number]{width:68px;height:30px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:#fff;padding:0 8px;font-size:13px;font-family:inherit}
+  .btn{height:30px;padding:0 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:none;display:inline-flex;align-items:center;gap:5px;letter-spacing:0.02em;white-space:nowrap}
+  .btn:disabled{opacity:0.4;cursor:not-allowed}
+  .btn-go{background:var(--green);color:#000}
+  .btn-go:hover:not(:disabled){background:#00f28a}
+  .btn-stop{background:transparent;border:1px solid var(--amber);color:var(--amber)}
+  .btn-stop:hover:not(:disabled){background:#1f1800}
+  .btn-flush{background:transparent;border:1px solid var(--red);color:var(--red);height:32px;padding:0 16px;font-size:13px}
+  .btn-flush:hover:not(:disabled){background:#1f0008}
+  .btn-plain{background:var(--surface2);border:1px solid var(--border);color:var(--text);height:32px;padding:0 14px;font-size:12px}
+  .btn-plain:hover:not(:disabled){border-color:#555;color:#fff}
+  .log{height:130px;overflow-y:auto;background:var(--surface2);border-radius:7px;padding:8px 10px;font-family:'SF Mono',monospace,monospace;font-size:11px;line-height:1.7;color:var(--muted)}
+  .log .ok{color:var(--green)}.log .err{color:var(--red)}.log .warn{color:var(--amber)}.log .info{color:var(--text)}
+  .footer-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px}
+  .footer-bar p{flex:1;font-size:12px;color:var(--muted)}
+  .footer-bar strong{display:block;font-size:12px;color:var(--text);margin-bottom:2px}
+  #flushmsg,#postmsg{font-size:11px;color:var(--muted)}
+  @media(max-width:700px){.panels{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>NBC Recrawl</h1>
+<p class="sub">Flush Redis → crawl reviews (Source A) → crawl library (Source B) → purge dupes → rebuild index</p>
+
+<div class="flush-bar">
+  <div style="flex:1">
+    <strong>Step 1 — Wipe Redis cache</strong>
+    <p>Deletes all cached device data, the index, search index, and crawl state. Run this first.</p>
+    <div class="bar-wrap" style="margin-top:8px">
+      <div class="bar-track"><div class="bar-fill bar-fill-flush" id="flushBar"></div></div>
+      <div class="bar-info"><span id="flushMsg">idle</span></div>
+    </div>
+  </div>
+  <button class="btn btn-flush" id="btnFlush" onclick="doFlush()">Wipe all cache</button>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <div class="panel-head">
+      <div class="dot" id="dotA"></div>
+      Source A — reviews listing
+      <span class="tag tag-a">~80 pages</span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="metric-val" id="aPages">0</div><div class="metric-lbl">pages</div></div>
+      <div class="metric"><div class="metric-val" id="aTotal">0</div><div class="metric-lbl">total index</div></div>
+      <div class="metric"><div class="metric-val" id="aNew">0</div><div class="metric-lbl">new added</div></div>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-track"><div class="bar-fill bar-fill-a" id="barA"></div></div>
+      <div class="bar-info"><span id="labelA">not started</span><span id="pctA"></span></div>
+    </div>
+    <div class="ctl">
+      <label>start page</label>
+      <input type="number" id="aStart" value="1" min="1" max="80">
+      <button class="btn btn-go" id="btnStartA" onclick="startA()">▶ Start</button>
+      <button class="btn btn-stop" id="btnStopA" style="display:none" onclick="stopA()">■ Stop</button>
+    </div>
+    <div class="log" id="logA"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head">
+      <div class="dot" id="dotB"></div>
+      Source B — library / chrono
+      <span class="tag tag-b">until empty</span>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="metric-val" id="bPages">0</div><div class="metric-lbl">pages</div></div>
+      <div class="metric"><div class="metric-val" id="bTotal">0</div><div class="metric-lbl">total index</div></div>
+      <div class="metric"><div class="metric-val" id="bNew">0</div><div class="metric-lbl">new added</div></div>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-track"><div class="bar-fill bar-fill-b" id="barB"></div></div>
+      <div class="bar-info"><span id="labelB">not started</span><span id="pctB"></span></div>
+    </div>
+    <div class="ctl">
+      <label>start page</label>
+      <input type="number" id="bStart" value="1" min="1">
+      <button class="btn btn-go" id="btnStartB" onclick="startB()">▶ Start</button>
+      <button class="btn btn-stop" id="btnStopB" style="display:none" onclick="stopB()">■ Stop</button>
+    </div>
+    <div class="log" id="logB"></div>
+  </div>
+</div>
+
+<div class="footer-bar">
+  <div>
+    <strong>Step 3 — Finish up</strong>
+    <p>After both crawls complete: purge library entries that have a review URL, then rebuild the search index so /api/phone works instantly.</p>
+  </div>
+  <button class="btn btn-plain" onclick="doPurge()" id="btnPurge">Purge dupes</button>
+  <button class="btn btn-plain" onclick="doRebuild()" id="btnRebuild">Rebuild index</button>
+  <span id="postmsg"></span>
+</div>
+
+<script>
+const DELAY = 900;
+let aStop = false, bStop = false;
+
+function ts() { return new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+
+function logLine(id, msg, cls) {
+  const el = document.getElementById(id);
+  el.innerHTML += '<div class="' + cls + '">[' + ts() + '] ' + msg + '</div>';
+  el.scrollTop = el.scrollHeight;
+}
+
+function setDot(id, state) {
+  const el = document.getElementById(id);
+  el.className = 'dot';
+  if (state) el.classList.add(state);
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function doFlush() {
+  if (!confirm('Wipe ALL Redis data — device cache, index, everything?')) return;
+  const btn = document.getElementById('btnFlush');
+  btn.disabled = true;
+  document.getElementById('flushMsg').textContent = 'wiping…';
+  document.getElementById('flushBar').style.width = '35%';
+  try {
+    const r = await fetch('/api/index/clear?confirm=yes');
+    const d = await r.json();
+    document.getElementById('flushBar').style.width = '100%';
+    document.getElementById('flushMsg').textContent = 'done — Redis cleared ✓';
+    setTimeout(() => {
+      document.getElementById('flushBar').style.width = '0%';
+      document.getElementById('flushMsg').textContent = 'idle';
+      btn.disabled = false;
+    }, 3000);
+  } catch(e) {
+    document.getElementById('flushMsg').textContent = 'error: ' + e.message;
+    document.getElementById('flushBar').style.width = '0%';
+    btn.disabled = false;
+  }
+}
+
+async function startA() {
+  aStop = false;
+  let page = parseInt(document.getElementById('aStart').value) || 1;
+  let pages = 0, newTotal = 0, lastIdx = 0, empty = 0;
+  const MAXP = 80;
+  document.getElementById('btnStartA').disabled = true;
+  document.getElementById('btnStopA').style.display = 'inline-flex';
+  setDot('dotA', 'run');
+  logLine('logA', 'Source A started (reviews listing)…', 'ok');
+
+  while (!aStop && page <= MAXP) {
+    document.getElementById('aStart').value = page;
+    try {
+      const r = await fetch('/api/index/crawl-reviews-page?page=' + page);
+      if (!r.ok) { logLine('logA', 'p' + page + ' HTTP ' + r.status, 'err'); await sleep(2500); page++; continue; }
+      const d = await r.json();
+      if (!d.success) { logLine('logA', 'p' + page + ': ' + (d.error || 'error'), 'err'); await sleep(2500); page++; continue; }
+      const res = d.result;
+      pages++; newTotal += res.newUrls; lastIdx = res.totalUrls; empty = res.phonesFound === 0 ? empty + 1 : 0;
+      document.getElementById('aPages').textContent = pages;
+      document.getElementById('aTotal').textContent = lastIdx;
+      document.getElementById('aNew').textContent = newTotal;
+      const pct = Math.min(Math.round(page / MAXP * 100), 99);
+      document.getElementById('barA').style.width = pct + '%';
+      document.getElementById('pctA').textContent = pct + '%';
+      document.getElementById('labelA').textContent = 'p' + page + ' — ' + res.phonesFound + ' found, ' + res.newUrls + ' new';
+      logLine('logA', 'p' + page + ' → ' + res.phonesFound + ' reviews, ' + res.newUrls + ' new (index: ' + res.totalUrls + ')', res.newUrls > 0 ? 'ok' : 'info');
+      if (res.done || empty >= 3) { logLine('logA', 'Source A complete.', 'ok'); break; }
+      page++;
+      await sleep(DELAY);
+    } catch(e) { logLine('logA', 'p' + page + ' error: ' + e.message, 'err'); await sleep(3000); page++; }
+  }
+
+  document.getElementById('barA').style.width = '100%';
+  document.getElementById('pctA').textContent = aStop ? 'stopped' : '100%';
+  document.getElementById('labelA').textContent = aStop ? 'stopped at p' + page : 'done';
+  setDot('dotA', aStop ? '' : 'done');
+  document.getElementById('btnStartA').disabled = false;
+  document.getElementById('btnStartA').textContent = '▶ Resume';
+  document.getElementById('btnStopA').style.display = 'none';
+}
+
+function stopA() { aStop = true; logLine('logA', 'stop requested…', 'warn'); }
+
+async function startB() {
+  bStop = false;
+  let page = parseInt(document.getElementById('bStart').value) || 1;
+  let pages = 0, newTotal = 0, lastIdx = 0, empty = 0;
+  document.getElementById('btnStartB').disabled = true;
+  document.getElementById('btnStopB').style.display = 'inline-flex';
+  setDot('dotB', 'run');
+  logLine('logB', 'Source B started (library / chrono)…', 'ok');
+
+  while (!bStop) {
+    document.getElementById('bStart').value = page;
+    try {
+      const r = await fetch('/api/index/crawl-page?page=' + page);
+      if (!r.ok) { logLine('logB', 'p' + page + ' HTTP ' + r.status, 'err'); await sleep(2500); page++; empty++; if (empty >= 3) break; continue; }
+      const d = await r.json();
+      if (!d.success) { logLine('logB', 'p' + page + ': ' + (d.error || 'error'), 'err'); await sleep(2500); page++; empty++; if (empty >= 3) break; continue; }
+      const res = d.result;
+      pages++; newTotal += res.newUrls; lastIdx = res.totalUrls;
+      document.getElementById('bPages').textContent = pages;
+      document.getElementById('bTotal').textContent = lastIdx;
+      document.getElementById('bNew').textContent = newTotal;
+      const pct = Math.min(Math.round(pages / 300 * 100), 99);
+      document.getElementById('barB').style.width = pct + '%';
+      document.getElementById('pctB').textContent = 'p' + page;
+      document.getElementById('labelB').textContent = 'p' + page + ' — ' + res.phonesFound + ' found, ' + res.newUrls + ' new';
+      logLine('logB', 'p' + page + ' → ' + res.phonesFound + ' phones, ' + res.newUrls + ' new (index: ' + res.totalUrls + ')', res.newUrls > 0 ? 'ok' : 'info');
+      if (res.done || res.phonesFound === 0) { empty++; if (empty >= 3) { logLine('logB', 'Source B exhausted.', 'ok'); break; } }
+      else { empty = 0; }
+      page++;
+      await sleep(DELAY);
+    } catch(e) { logLine('logB', 'p' + page + ' error: ' + e.message, 'err'); await sleep(3000); page++; empty++; if (empty >= 3) break; }
+  }
+
+  document.getElementById('barB').style.width = '100%';
+  document.getElementById('pctB').textContent = bStop ? 'stopped' : 'done';
+  document.getElementById('labelB').textContent = bStop ? 'stopped at p' + page : 'done';
+  setDot('dotB', bStop ? '' : 'done');
+  document.getElementById('btnStartB').disabled = false;
+  document.getElementById('btnStartB').textContent = '▶ Resume';
+  document.getElementById('btnStopB').style.display = 'none';
+}
+
+function stopB() { bStop = true; logLine('logB', 'stop requested…', 'warn'); }
+
+async function doPurge() {
+  const btn = document.getElementById('btnPurge');
+  btn.disabled = true;
+  document.getElementById('postmsg').textContent = 'purging…';
+  try {
+    const r = await fetch('/api/index/purge-library-duplicates');
+    const d = await r.json();
+    document.getElementById('postmsg').textContent = 'purged ' + (d.purged || 0) + ', kept ' + (d.kept || 0);
+  } catch(e) { document.getElementById('postmsg').textContent = 'error: ' + e.message; }
+  btn.disabled = false;
+}
+
+async function doRebuild() {
+  const btn = document.getElementById('btnRebuild');
+  btn.disabled = true;
+  document.getElementById('postmsg').textContent = 'rebuilding…';
+  try {
+    const r = await fetch('/api/index/rebuild-search');
+    const d = await r.json();
+    document.getElementById('postmsg').textContent = d.message || 'done ✓';
+  } catch(e) { document.getElementById('postmsg').textContent = 'error: ' + e.message; }
+  btn.disabled = false;
+}
+</script>
+</body>
+</html>`);
+});
+
 app.get('/crawler', (_, res) => {
   res.setHeader('Content-Type', 'text/html');
   res.send(`<!DOCTYPE html>
