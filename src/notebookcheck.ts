@@ -745,17 +745,22 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     'https://searxng-notebookcheck.onrender.com',
   ];
 
-  // Fire two queries in parallel when nq differs from oq
-  const queries = [oq, ...(nq !== oq ? [nq] : [])];
-  
-  debugLog.push({ step: 'queries', queries, queryCount: queries.length });
+  // Use nq (normalized) as primary query; fall back to oq only if nq returns 0 results.
+  // Sequential — not parallel — to avoid CPU contention on Render free tier.
+  // FIX: was firing both oq+nq in parallel with Promise.all → doubled load.
+  const primaryQuery = nq !== oq ? nq : oq;
+  const fallbackQuery = nq !== oq ? oq : null;
+
+  debugLog.push({ step: 'queries', primaryQuery, fallbackQuery });
 
   const doSearch = async (base: string, q: string) => {
     const searchUrl = `${base}/search`;
+    // FIX: removed `engines` param — was hardcoded to 'google,bing,duckduckgo',
+    // overriding settings.yml. Bing+DDG block Render IPs → 4.5s timeouts → null results.
+    // Let settings.yml decide (Google only).
     const params = { 
       q: `site:notebookcheck.net ${q} review`, 
       format: 'json', 
-      engines: 'google,bing,duckduckgo', 
       categories: 'general' 
     };
     
@@ -764,7 +769,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     const resp = await sharedAxios.get(searchUrl, {
       params,
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-      timeout: 15000, // Increased to 15s for cold starts
+      timeout: 8000, // FIX: was 15000ms — 8s is enough for Google via SearXNG
       signal,
     });
     
@@ -795,14 +800,23 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     debugLog.push({ step: 'trying_instance', base });
 
     try {
-      const responses = await Promise.all(queries.map(q => doSearch(base, q)));
-      const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
+      // FIX: sequential queries instead of Promise.all — avoids CPU contention on Render free tier.
+      // Primary query first; only fire fallback if primary returns 0 raw results.
+      let primaryItems = await doSearch(base, primaryQuery);
+      debugLog.push({ step: 'primary_results', base, query: primaryQuery, count: primaryItems.length });
+
+      if (primaryItems.length === 0 && fallbackQuery) {
+        debugLog.push({ step: 'fallback_attempt', base, query: fallbackQuery });
+        primaryItems = await doSearch(base, fallbackQuery);
+        debugLog.push({ step: 'fallback_results', base, query: fallbackQuery, count: primaryItems.length });
+      }
+
+      const totalResults = primaryItems.length;
       
       debugLog.push({ 
-        step: 'parallel_results',
+        step: 'sequential_results',
         base, 
         totalRawResults: totalResults,
-        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
       });
       
       if (totalResults > 0) {
@@ -812,6 +826,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         let droppedCount = 0;
         let dropReasons: Record<string, number> = {};
         
+        const responses = [primaryItems];
         for (const items of responses) {
           for (const item of items) {
             const url   = (item.url || '').trim();
@@ -874,7 +889,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         
         return all;
       } else {
-        debugLog.push({ step: 'zero_raw_results', base, queries });
+        debugLog.push({ step: 'zero_raw_results', base, primaryQuery, fallbackQuery });
       }
     } catch (e) {
       debugLog.push({ 
@@ -963,11 +978,11 @@ export function resolveSearchResult(
 async function searchNBC(query: string): Promise<{ name: string; url: string } | null> {
   const ck = `nbc:search:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, results] = await Promise.all([
-    getCacheAs<{ name: string; url: string }>(ck),
-    searchViaSearXNG(nq, oq),
-  ]);
+  // FIX: was Promise.all([cache, searxng]) — always fired SearXNG even on cache hits.
+  // Now cache-first: only call SearXNG on a miss.
+  const cached = await getCacheAs<{ name: string; url: string }>(ck);
   if (cached) return cached;
+  const results = await searchViaSearXNG(nq, oq);
   if (!results.length) return null;
   return resolveSearchResult(results, nq, oq, ck);
 }
