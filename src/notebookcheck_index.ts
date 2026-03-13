@@ -28,17 +28,12 @@ const PROGRESS_KEY  = `nbc:index:${INDEX_VERSION}:crawl_progress`;
 const ENTRIES_TTL   = 30 * 24 * 3600;
 const LOCK_TTL      = 300;
 
-// Smartphone-specific listing pages on NotebookCheck
-// Reviews.55.0.html = all reviews (mostly laptops), Smartphones.155.0.html = phones only
-const NBC_REVIEWS_BASE  = 'https://www.notebookcheck.net/Reviews.55.0.html';
-const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html';
-// NBC Library: device database pages (spec/aggregator pages for devices NBC tracks but
-// hasn't written a full review for, e.g. Vivo-X200.919417.0.html). These never appear
-// on the Smartphones listing but ARE discoverable via the Library filtered to smartphones.
-// NBC Library — all device types, paginated by date. extractPhoneUrls filters out
-// laptops and tablets, keeping only phone aggregator pages like Vivo-X200.919417.0.html.
-// This is the correct second source: no stype param needed, filtering is done in code.
-const NBC_LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html';
+// Chronological listing — all device types sorted by date added.
+// This is the correct source: contains BOTH full reviews and aggregator/library pages,
+// ordered newest-first. extractPhoneUrls + smartphone keyword filtering handles
+// the separation — any row whose title/label contains "Smartphone" is kept;
+// laptops, tablets, and other hardware are discarded.
+const NBC_CHRONO_BASE = 'https://www.notebookcheck.net/Chronological-sorting.2690.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -197,6 +192,9 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
   const out: Array<{ url: string; title: string }> = [];
   const seen = new Set<string>();
 
+  // On the Chronological page, each row has a device-type label (e.g. "Smartphone",
+  // "Notebook", "Tablet") visible as text near the link. We use that as the primary
+  // signal, falling back to slug-based heuristics for other listing pages.
   $('a[href]').each((_, el) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -208,25 +206,25 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
 
     const slug = href.split('/').pop() || '';
     // Skip known listing/navigation pages
-    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison)\./i.test(slug)) return;
-    if (/-Series\./i.test(slug)) return; // exclude series overview pages (e.g. Xiaomi-17-Series.1176125.0.html)
+    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./.test(slug)) return;
+    if (/-Series\./i.test(slug)) return;
 
-    // Exclude laptops, CPU/GPU analyses and non-phone hardware immediately
-    // Tablets: -Pad-, Galaxy-Tab, iPad, MatePad, MediaPad, -Tab-, Lenovo Tab, etc.
+    // ── PRIMARY FILTER: Smartphone label on Chronological page ───────────────
+    // The chronological table has a "Type" column / cell near each row.
+    // Walk up to the row (<tr>) and check if "Smartphone" appears in it.
+    // This is the cleanest signal — if it says Smartphone, keep it; otherwise
+    // fall through to slug-based heuristics so the function still works on
+    // other listing pages (Smartphones.155, Library.279, etc.).
+    const $row = $(el).closest('tr');
+    if ($row.length) {
+      const rowText = $row.text();
+      if (!/smartphone/i.test(rowText)) return; // chronological page: strict type match
+    }
+
+    // ── SECONDARY FILTER: slug-based heuristics (non-table listing pages) ────
     const tabletSlug = /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|magicpad|lenovo[-_]tab|honor[-_]pad|xiaomi[-_]pad|realme[-_]pad|oppo[-_]pad|oneplus[-_]pad|iqoo[-_]pad|tcl[-_]tab|nokia[-_]tab/i.test(slug);
     const notAPhone = tabletSlug || /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
     if (notAPhone) return;
-
-    // Accept two URL patterns:
-    //   1. Full NBC review:       "Vivo-X200-FE-review.1114877.0.html"  (-review in slug)
-    //   2. Aggregator/spec page:  "Vivo-X200.919417.0.html"             (Brand-Model.ID.0.html)
-    //      NBC tracks these devices and aggregates external reviews + specs even without
-    //      writing their own review. Useful for base models, regional variants, etc.
-    const isReviewUrl       = /[-_]review\.\d{4,}\.0\.html$/i.test(slug);
-    const hasPhoneKeyword   = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
-    const looksLikePhoneModel = /^(samsung[-_]galaxy|google[-_]pixel|oneplus|xiaomi|oppo|vivo|realme|motorola[-_]moto|sony[-_]xperia|honor|huawei|nothing[-_]phone|nokia|poco|redmi|iqoo|tcl|infinix|tecno|lava|blackberry|meizu|nubia|fairphone|ulefone|doogee|blackview|oukitel|umidigi|blu|alcatel|zte|unihertz|crosscall|agm)/i.test(slug);
-
-    if (!isReviewUrl && !hasPhoneKeyword && !looksLikePhoneModel) return;
 
     if (seen.has(href.toLowerCase())) return;
     seen.add(href.toLowerCase());
@@ -252,33 +250,17 @@ export interface CrawlPageResult {
 export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
 
-  // ── Source 1: Smartphones review listing ─────────────────────────────────
-  // Full NBC-written reviews, sorted by date. Paginated via ?&ns_page=N.
-  const reviewsUrl = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
+  // ── Source: NBC Chronological listing ────────────────────────────────────
+  // All device types sorted newest-first. Paginated via ?&ns_page=N.
+  // extractPhoneUrls checks for "Smartphone" in the table row — cleanest filter.
+  const chronoUrl = page === 1 ? NBC_CHRONO_BASE : `${NBC_CHRONO_BASE}?&ns_page=${page}`;
 
-  // ── Source 2: NBC Library (all-device external review aggregator) ─────────
-  // Mixed feed of phones + tablets + laptops, sorted by date added.
-  // extractPhoneUrls filters out tablets and laptops, keeping only phone
-  // aggregator pages like Vivo-X200.919417.0.html that never appear in Source 1.
-  const libraryUrl = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?&ns_page=${page}`;
+  const chronoHtml = await fetchHtml(chronoUrl);
+  const found = extractPhoneUrls(chronoHtml);
 
-  const [reviewsHtml, libraryHtml] = await Promise.all([
-    fetchHtml(reviewsUrl),
-    (async () => { try { return await fetchHtml(libraryUrl, 12000); } catch { return ''; } })(),
-  ]);
-
-  const foundFromReviews = extractPhoneUrls(reviewsHtml);
-  const foundFromLibrary = extractPhoneUrls(libraryHtml);
-
-  // Deduplicate — same device can appear in both sources
-  const seenUrls = new Set(foundFromReviews.map(f => f.url.toLowerCase()));
-  const dedupedLibrary = foundFromLibrary.filter(f => !seenUrls.has(f.url.toLowerCase()));
-  const found = [...foundFromReviews, ...dedupedLibrary];
-
-  // Done when BOTH sources have no links (a reviews page full of laptops is not done)
-  const reviewsRaw = (reviewsHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
-  const libraryRaw = (libraryHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
-  const pageIsEmpty = reviewsRaw === 0 && libraryRaw === 0;
+  // Done when the page returns no device links at all
+  const rawLinks = (chronoHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = rawLinks === 0;
 
   const entries = await loadEntries();
   let newUrls = 0;
