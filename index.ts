@@ -51,14 +51,19 @@ app.get('/api/phone', async (req, res) => {
     const qLower = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
     const qTokens = qLower.split(' ').filter((t: string) => t.length >= 2);
 
-    const { entries } = await getIndexEntries({ status: 'all', limit: 200 });
+    // Load ALL entries (not just 200) to search the full index
+    const { entries } = await getIndexEntries({ status: 'all', limit: 2000 });
 
     // Score each entry by how many query tokens match the title/slug
     let best: any = null;
     let bestScore = 0;
     for (const entry of entries) {
       const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
-      const score = qTokens.filter((t: string) => haystack.includes(t)).length;
+      // Count matching tokens, with bonus for consecutive matches
+      const matchedTokens = qTokens.filter((t: string) => haystack.includes(t));
+      let score = matchedTokens.length;
+      // Bonus: if all tokens match, prioritize by title length (shorter = more specific match)
+      if (matchedTokens.length === qTokens.length) score += 10 - Math.min(10, entry.title.length / 50);
       if (score > bestScore) { bestScore = score; best = entry; }
     }
 
