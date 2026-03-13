@@ -32,6 +32,10 @@ const LOCK_TTL      = 300;
 // Reviews.55.0.html = all reviews (mostly laptops), Smartphones.155.0.html = phones only
 const NBC_REVIEWS_BASE  = 'https://www.notebookcheck.net/Reviews.55.0.html';
 const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html';
+// NBC Library: device database pages (spec/aggregator pages for devices NBC tracks but
+// hasn't written a full review for, e.g. Vivo-X200.919417.0.html). These never appear
+// on the Smartphones listing but ARE discoverable via the Library filtered to smartphones.
+const NBC_LIBRARY_BASE  = 'https://www.notebookcheck.net/Smartphone.305158.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -200,15 +204,23 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     if (!/\.\d{4,}\.0\.html$/.test(href)) return;
 
     const slug = href.split('/').pop() || '';
-    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News)\./i.test(slug)) return;
+    // Skip known listing/navigation pages
+    if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Series|Comparison)\./i.test(slug)) return;
 
     // Exclude laptops, CPU/GPU analyses and non-phone hardware immediately
     const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
     if (notAPhone) return;
 
-    const hasPhone = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
+    // Accept two URL patterns:
+    //   1. Full NBC review:       "Vivo-X200-FE-review.1114877.0.html"  (-review in slug)
+    //   2. Aggregator/spec page:  "Vivo-X200.919417.0.html"             (Brand-Model.ID.0.html)
+    //      NBC tracks these devices and aggregates external reviews + specs even without
+    //      writing their own review. Useful for base models, regional variants, etc.
+    const isReviewUrl       = /[-_]review\.\d{4,}\.0\.html$/i.test(slug);
+    const hasPhoneKeyword   = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
     const looksLikePhoneModel = /^(samsung[-_]galaxy|google[-_]pixel|oneplus|xiaomi|oppo|vivo|realme|motorola[-_]moto|sony[-_]xperia|honor|huawei|nothing[-_]phone|nokia|poco|redmi|iqoo|tcl|infinix|tecno|lava|blackberry|meizu|nubia|fairphone|ulefone|doogee|blackview|oukitel|umidigi|blu|alcatel|zte|unihertz|crosscall|agm)/i.test(slug);
-    if (!hasPhone && !looksLikePhoneModel) return;
+
+    if (!isReviewUrl && !hasPhoneKeyword && !looksLikePhoneModel) return;
 
     if (seen.has(href.toLowerCase())) return;
     seen.add(href.toLowerCase());
@@ -233,15 +245,34 @@ export interface CrawlPageResult {
 
 export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
-  // Use the dedicated Smartphones listing page — covers all phone reviews including newest
-  const url = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
-  const html = await fetchHtml(url);
-  const found = extractPhoneUrls(html);
 
-  // Detect a truly empty/last page by counting ALL review links on the page,
-  // not just filtered phone URLs — a page full of laptops should NOT stop the crawl
-  const rawLinkCount = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
-  const pageIsEmpty = rawLinkCount === 0;
+  // ── Source 1: Smartphones review listing (full NBC reviews, newest first) ──
+  const reviewsUrl  = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
+  // ── Source 2: NBC device library (aggregator/spec pages for devices NBC tracks
+  //    but hasn't reviewed itself — e.g. Vivo-X200.919417.0.html). These are
+  //    sorted by date added and paginate the same way as the reviews listing.
+  const libraryUrl  = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?&ns_page=${page}`;
+
+  // Fetch both sources in parallel — independent pages, no dependency between them
+  const [reviewsHtml, libraryHtml] = await Promise.all([
+    fetchHtml(reviewsUrl),
+    fetchHtml(libraryUrl).catch(() => ''), // library is best-effort; don't abort crawl if it 503s
+  ]);
+
+  const foundFromReviews = extractPhoneUrls(reviewsHtml);
+  const foundFromLibrary = extractPhoneUrls(libraryHtml);
+
+  // Deduplicate across both sources (same URL may appear in both)
+  const seenUrls = new Set(foundFromReviews.map(f => f.url.toLowerCase()));
+  const dedupedLibrary = foundFromLibrary.filter(f => !seenUrls.has(f.url.toLowerCase()));
+  const found = [...foundFromReviews, ...dedupedLibrary];
+
+  // Page is done when BOTH sources return no links — a reviews page full of
+  // laptops is NOT done, only truly empty pages terminate the crawl
+  const reviewsEmpty = (reviewsHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length === 0;
+  const libraryEmpty = libraryHtml.length === 0 ||
+    (libraryHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length === 0;
+  const pageIsEmpty = reviewsEmpty && libraryEmpty;
 
   const entries = await loadEntries();
   let newUrls = 0;
@@ -488,7 +519,26 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
     }
   }
 
-  return bestScore > 0 ? best : null;
+  // Require a confident match — penalised scores (e.g. wrong variant) must not win.
+  // Base threshold: 3000. A clean full-word match scores 5000+; a variant-penalised
+  // match scores 3000 or less and should fall through to SearXNG.
+  const MIN_SCORE = 3500;
+  if (bestScore < MIN_SCORE || !best) return null;
+
+  // Hard-reject: if the query contains NO variant suffix but the winning entry does,
+  // the user asked for a base model that isn't in the index — don't return a wrong variant.
+  const VARIANT_SUFFIXES = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge',
+    'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g'];
+  const queryHasVariant = VARIANT_SUFFIXES.some(v => wordBoundaryRe(v).test(normalized));
+  if (!queryHasVariant) {
+    const cleanBestTitle = cleanIndexTitle(best.title).toLowerCase();
+    const titleHasExtraVariant = VARIANT_SUFFIXES.some(
+      v => wordBoundaryRe(v).test(cleanBestTitle) && !wordBoundaryRe(v).test(normalized)
+    );
+    if (titleHasExtraVariant) return null; // let SearXNG handle it
+  }
+
+  return best;
 }
 
 
