@@ -35,11 +35,10 @@ const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html'
 // NBC Library: device database pages (spec/aggregator pages for devices NBC tracks but
 // hasn't written a full review for, e.g. Vivo-X200.919417.0.html). These never appear
 // on the Smartphones listing but ARE discoverable via the Library filtered to smartphones.
-// NOTE: No second crawl source needed. extractPhoneUrls already handles both:
-//   - Full NBC review URLs:   "...-review.XXXXXX.0.html"
-//   - Aggregator/spec URLs:   "Brand-Model.XXXXXX.0.html" (looksLikePhoneModel match)
-// Both appear on Smartphones.155.0.html — aggregator pages are linked via "related devices".
-const NBC_LIBRARY_BASE = ''; // unused — kept for future use
+// NBC Library — all device types, paginated by date. extractPhoneUrls filters out
+// laptops and tablets, keeping only phone aggregator pages like Vivo-X200.919417.0.html.
+// This is the correct second source: no stype param needed, filtering is done in code.
+const NBC_LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -212,7 +211,9 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Series|Comparison)\./i.test(slug)) return;
 
     // Exclude laptops, CPU/GPU analyses and non-phone hardware immediately
-    const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
+    // Tablets: -Pad-, Galaxy-Tab, iPad, MatePad, MediaPad, -Tab-, Lenovo Tab, etc.
+    const tabletSlug = /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad|lenovo[-_]tab|honor[-_]pad|xiaomi[-_]pad|realme[-_]pad|oppo[-_]pad|oneplus[-_]pad|iqoo[-_]pad|tcl[-_]tab|nokia[-_]tab/i.test(slug);
+    const notAPhone = tabletSlug || /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
     if (notAPhone) return;
 
     // Accept two URL patterns:
@@ -249,17 +250,34 @@ export interface CrawlPageResult {
 
 export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
-  // Crawl the NBC smartphones listing. extractPhoneUrls now accepts both full review URLs
-  // (-review.XXXXXX.0.html) and aggregator/spec pages (Brand-Model.XXXXXX.0.html),
-  // so base models and non-reviewed devices are picked up automatically.
-  const url = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
-  const html = await fetchHtml(url);
-  const found = extractPhoneUrls(html);
 
-  // Detect a truly empty/last page by counting ALL review links on the page,
-  // not just filtered phone URLs — a page full of laptops should NOT stop the crawl
-  const rawLinkCount = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
-  const pageIsEmpty = rawLinkCount === 0;
+  // ── Source 1: Smartphones review listing ─────────────────────────────────
+  // Full NBC-written reviews, sorted by date. Paginated via ?&ns_page=N.
+  const reviewsUrl = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
+
+  // ── Source 2: NBC Library (all-device external review aggregator) ─────────
+  // Mixed feed of phones + tablets + laptops, sorted by date added.
+  // extractPhoneUrls filters out tablets and laptops, keeping only phone
+  // aggregator pages like Vivo-X200.919417.0.html that never appear in Source 1.
+  const libraryUrl = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}?&ns_page=${page}`;
+
+  const [reviewsHtml, libraryHtml] = await Promise.all([
+    fetchHtml(reviewsUrl),
+    (async () => { try { return await fetchHtml(libraryUrl, 12000); } catch { return ''; } })(),
+  ]);
+
+  const foundFromReviews = extractPhoneUrls(reviewsHtml);
+  const foundFromLibrary = extractPhoneUrls(libraryHtml);
+
+  // Deduplicate — same device can appear in both sources
+  const seenUrls = new Set(foundFromReviews.map(f => f.url.toLowerCase()));
+  const dedupedLibrary = foundFromLibrary.filter(f => !seenUrls.has(f.url.toLowerCase()));
+  const found = [...foundFromReviews, ...dedupedLibrary];
+
+  // Done when BOTH sources have no links (a reviews page full of laptops is not done)
+  const reviewsRaw = (reviewsHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const libraryRaw = (libraryHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = reviewsRaw === 0 && libraryRaw === 0;
 
   const entries = await loadEntries();
   let newUrls = 0;

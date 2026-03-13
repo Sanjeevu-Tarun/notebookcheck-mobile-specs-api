@@ -875,8 +875,8 @@ app.get('/api/index/library-debug', async (req, res) => {
   try {
     const axios2 = (await import('axios')).default;
     const { extractPhoneUrls } = await import('./src/notebookcheck_index');
-    const LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html?stype=2';
-    const url = page === 1 ? LIBRARY_BASE : `${LIBRARY_BASE}&ns_page=${page}`;
+    const LIBRARY_BASE = 'https://www.notebookcheck.net/Library.279.0.html';
+    const url = page === 1 ? LIBRARY_BASE : `${LIBRARY_BASE}?&ns_page=${page}`;
     const resp = await axios2.get(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
       timeout: 12000,
@@ -886,6 +886,17 @@ app.get('/api/index/library-debug', async (req, res) => {
     // Look specifically for aggregator-style URLs (no -review in slug)
     const aggregatorUrls = phones.filter(p => !/-review\.\d+\.0\.html$/i.test(p.url));
     const reviewUrls     = phones.filter(p =>  /-review\.\d+\.0\.html$/i.test(p.url));
+    // Show what was filtered out as tablets/laptops for verification
+    const cheerio2 = await import('cheerio');
+    const $ = cheerio2.load(html);
+    const allSlugs: string[] = [];
+    $('a[href]').each((_: any, el: any) => {
+      const href = ($(el).attr('href') || '').split('?')[0];
+      if (href.includes('notebookcheck.net') && /\.\d{4,}\.0\.html$/.test(href)) {
+        allSlugs.push(href.split('/').pop() || '');
+      }
+    });
+    const tabletSlugs = allSlugs.filter(s => /[-_]pad[-_.0]|[-_]tab[-_.0]|ipad|galaxy[-_]tab|matepad|mediapad/i.test(s));
     return res.json({
       success: phones.length > 0,
       page, url, fetchMs: Date.now() - t0,
@@ -893,8 +904,10 @@ app.get('/api/index/library-debug', async (req, res) => {
       total: phones.length,
       aggregatorPages: aggregatorUrls.length,
       reviewPages: reviewUrls.length,
-      sampleAggregator: aggregatorUrls.slice(0, 5).map(p => ({ url: p.url, title: p.title.slice(0, 80) })),
-      sampleReviews:    reviewUrls.slice(0, 3).map(p => ({ url: p.url, title: p.title.slice(0, 80) })),
+      tabletsFiltered: tabletSlugs.length,
+      sampleAggregator: aggregatorUrls.slice(0, 5).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
+      sampleReviews:    reviewUrls.slice(0, 3).map((p: any) => ({ url: p.url, title: p.title.slice(0, 80) })),
+      sampleTabletsFiltered: tabletSlugs.slice(0, 3),
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
