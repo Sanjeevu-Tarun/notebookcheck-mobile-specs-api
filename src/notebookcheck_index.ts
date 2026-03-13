@@ -524,21 +524,10 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
   }
 
   let newUrls = 0;
-  for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
-    const batch = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
-    await Promise.all(batch.map(async ({ url: libraryUrl, title }) => {
-      try {
-        const resolvedUrl = /-review-/i.test(libraryUrl)
-          ? libraryUrl
-          : await resolveToReviewUrl(libraryUrl);
-        const finalUrl = resolvedUrl || libraryUrl;
-        if (entries[finalUrl]) return;
-        entries[finalUrl] = makeEntry(finalUrl, title);
-        newUrls++;
-      } catch {
-        if (!entries[libraryUrl]) { entries[libraryUrl] = makeEntry(libraryUrl, title); newUrls++; }
-      }
-    }));
+  for (const { url: u, title } of toResolve) {
+    if (entries[u]) continue;
+    entries[u] = makeEntry(u, title);
+    newUrls++;
   }
 
   if (newUrls > 0) await saveEntries(entries);
@@ -552,15 +541,9 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
 
 // ── SOURCE B: Chronological listing (library/external fallback) ───────────────
 //
-// KEY FIX: every new library URL is immediately resolved to its internal NBC
-// review URL (if one exists) before being stored in the index.
-// Previously crawlChronoPage stored library URLs raw and relied on a separate
-// migrateToReviewUrls step — meaning devices like Pixel 10 Pro XL ended up
-// with the minimised library/aggregator page instead of the full review page.
-//
-// Vercel safety: resolves in parallel batches of RESOLVE_CONCURRENCY.
-// Each resolveToReviewUrl does one HTTP fetch (~1-3s). With concurrency=5
-// and ~20 phones/page we need ~4-12s — well within the 30s Vercel limit.
+// Stores library URLs raw — fast, Vercel-safe (no extra HTTP fetches per page).
+// After crawling, run /api/index/recover-review-urls to resolve library URLs →
+// internal NBC review URLs in bulk (uses Redis-cached resolves, very fast).
 const RESOLVE_CONCURRENCY = 5;
 
 export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
@@ -574,7 +557,7 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
 
   const entries = await loadEntries();
 
-  // Build a set of device slug prefixes already covered by a review URL
+  // Build review prefix set — skip devices already covered by a review URL
   const reviewPrefixes = new Set<string>();
   for (const u of Object.keys(entries)) {
     if (/-review-/i.test(u)) {
@@ -583,59 +566,14 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
     }
   }
 
-  // Filter to only new URLs not yet in the index and not already covered by a review
-  const toResolve: Array<{ url: string; title: string }> = [];
+  let newUrls = 0;
   for (const { url: u, title } of found) {
     if (entries[u]) continue;
     const slug = u.split('/').pop() || '';
     const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
     if (reviewPrefixes.has(prefix)) continue;
-    // Skip if we already have a review URL for the same device slug
-    // (e.g. library URL arrives after Source A already indexed the review URL)
-    if (/-review-/i.test(u)) {
-      // It's already a review URL — store directly
-      toResolve.push({ url: u, title });
-    } else {
-      toResolve.push({ url: u, title });
-    }
-  }
-
-  let newUrls = 0;
-
-  // Resolve each library URL → internal review URL in parallel batches
-  for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
-    const batch = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
-    await Promise.all(batch.map(async ({ url: libraryUrl, title }) => {
-      try {
-        // resolveToReviewUrl fetches the library page and finds the "-review-" link.
-        // Returns the internal review URL if found, else the original library URL.
-        const resolvedUrl = /-review-/i.test(libraryUrl)
-          ? libraryUrl  // already a review URL — no fetch needed
-          : await resolveToReviewUrl(libraryUrl);
-
-        const finalUrl = resolvedUrl || libraryUrl;
-
-        // If the resolved URL is already in the index (e.g. Source A already added it), skip
-        if (entries[finalUrl]) return;
-
-        // If resolved to a review URL, also check its prefix against existing reviews
-        if (finalUrl !== libraryUrl && /-review-/i.test(finalUrl)) {
-          const rSlug = finalUrl.split('/').pop() || '';
-          const rPrefix = rSlug.toLowerCase().split('-review-')[0];
-          // If we already have a different review for the same device, skip
-          if ([...Object.keys(entries)].some(u => /-review-/i.test(u) && u !== finalUrl && u.split('/').pop()?.toLowerCase().startsWith(rPrefix))) return;
-        }
-
-        entries[finalUrl] = makeEntry(finalUrl, title);
-        newUrls++;
-      } catch {
-        // On resolve failure, fall back to storing the library URL
-        if (!entries[libraryUrl]) {
-          entries[libraryUrl] = makeEntry(libraryUrl, title);
-          newUrls++;
-        }
-      }
-    }));
+    entries[u] = makeEntry(u, title);
+    newUrls++;
   }
 
   if (newUrls > 0) await saveEntries(entries);
@@ -1092,7 +1030,7 @@ export async function migrateToReviewUrls(batchSize = 200): Promise<MigrateResul
   await rSet(MIGRATE_CURSOR_KEY, newCursor, 30 * 24 * 3600);
   await rSet(MIGRATE_STATS_KEY,  stats,     30 * 24 * 3600);
 
-  // On completion: rebuild search index and clear migration states
+  // On completion: rebuild search index and clear migration state
   if (done) {
     await rebuildSearchIndex();
     await rDel(MIGRATE_CURSOR_KEY);

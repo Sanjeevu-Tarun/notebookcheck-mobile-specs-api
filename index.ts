@@ -1619,11 +1619,12 @@ app.get('/recrawl', (_, res) => {
 
 <div class="footer-bar">
   <div>
-    <strong>Step 3 — Finish up</strong>
-    <p>After both crawls complete: purge library entries that have a review URL, then rebuild the search index so /api/phone works instantly.</p>
+    <strong>Step 3 — Finish up (run in order)</strong>
+    <p>Resolve library URLs → review URLs, then purge remaining library dupes, then rebuild the search index.</p>
   </div>
-  <button class="btn btn-plain" onclick="doPurge()" id="btnPurge">Purge dupes</button>
-  <button class="btn btn-plain" onclick="doRebuild()" id="btnRebuild">Rebuild index</button>
+  <button class="btn btn-plain" onclick="doResolve()" id="btnResolve">1. Resolve reviews</button>
+  <button class="btn btn-plain" onclick="doPurge()" id="btnPurge">2. Purge dupes</button>
+  <button class="btn btn-plain" onclick="doRebuild()" id="btnRebuild">3. Rebuild index</button>
   <span id="postmsg"></span>
 </div>
 
@@ -1807,6 +1808,18 @@ async function startC() {
 
 function stopC() { cStop = true; logLine('logC', 'stop requested…', 'warn'); }
 
+async function doResolve() {
+  const btn = document.getElementById('btnResolve');
+  btn.disabled = true;
+  document.getElementById('postmsg').textContent = 'resolving library → review URLs…';
+  try {
+    const r = await fetch('/api/index/recover-review-urls');
+    const d = await r.json();
+    document.getElementById('postmsg').textContent = `resolved: ${d.recovered || 0} new review URLs found`;
+  } catch(e) { document.getElementById('postmsg').textContent = 'resolve error: ' + e.message; }
+  btn.disabled = false;
+}
+
 async function doPurge() {
   const btn = document.getElementById('btnPurge');
   btn.disabled = true;
@@ -1917,7 +1930,7 @@ app.get('/crawler', (_, res) => {
 </html>`);
 });
 
-// /api/index/rebuild-search — rebuild the fast search index from entriess
+// /api/index/rebuild-search — rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {
     await rebuildSearchIndex();
