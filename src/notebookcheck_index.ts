@@ -224,9 +224,8 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
 
 const RESOLVE_TTL = 7 * 24 * 3600; // 7 days
 
-async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
+export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
   const ck = `nbc:review_resolve:${libraryUrl}`;
-  // Check cache first
   try {
     const cached = await rGet(ck) as string;
     if (cached) return cached;
@@ -236,31 +235,96 @@ async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
   try {
     html = await fetchHtml(libraryUrl, 10000);
   } catch {
-    return libraryUrl; // on fetch error, fall back to library URL
+    return libraryUrl;
   }
 
   const $ = cheerio.load(html);
+
+  // Extract the device name from the library URL slug so we can find THE CORRECT review.
+  // Library URL slug: "Google-Pixel-9-Pro-XL.873451.0.html"
+  // We want: "google-pixel-9-pro-xl" (lowercase, no numeric suffix)
+  const librarySlug = (libraryUrl.split('/').pop() || '')
+    .replace(/\.\d+\.0\.html$/, '')
+    .toLowerCase();
+
   let reviewUrl: string | null = null;
 
-  // The library page lists NBC's own review as the first entry in the reviews table/list.
-  // It looks like: <a href="/Samsung-Galaxy-S25-Ultra-review-....968346.0.html">89.4% ...</a>
-  // We scan ALL links on the page for a notebookcheck URL that:
-  //   (a) contains "-review-" in the slug
-  //   (b) ends with .NNN.0.html
-  // The FIRST such link is always the NBC internal review.
-  $('a[href]').each((_, el) => {
-    if (reviewUrl) return; // already found
-    let href = $(el).attr('href') || '';
-    if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
-    if (!href.startsWith('https://www.notebookcheck.net')) return;
-    href = href.split('?')[0];
-    if (!/-review-/i.test(href)) return;
-    if (!/\.\d{4,}\.0\.html$/.test(href)) return;
-    reviewUrl = href;
-  });
+  // Strategy 1: Look inside the NBC "Reviews" section on the library page.
+  // NBC wraps their own review link(s) in a specific table or div with class
+  // "reviews", "nbc-reviews", or a <section> with id/class containing "review".
+  // The link text contains a percentage rating like "89.4%".
+  const reviewSectionSelectors = [
+    '.reviews a[href]',
+    '#reviews a[href]',
+    '.nbc_reviews a[href]',
+    'table.reviews a[href]',
+    '[class*="review"] a[href]',
+    '[id*="review"] a[href]',
+  ];
+
+  for (const sel of reviewSectionSelectors) {
+    if (reviewUrl) break;
+    $(sel).each((_, el) => {
+      if (reviewUrl) return;
+      let href = $(el).attr('href') || '';
+      if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+      if (!href.startsWith('https://www.notebookcheck.net')) return;
+      href = href.split('?')[0];
+      if (!/-review-/i.test(href)) return;
+      if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+      reviewUrl = href;
+    });
+  }
+
+  // Strategy 2: Scan ALL links but match slug prefix — only accept a review URL
+  // whose slug starts with the same words as the library page slug.
+  // This prevents picking up sidebar/nav links to unrelated device reviews.
+  // e.g. library="google-pixel-9-pro-xl" → only accept review slugs that start with
+  // "google-pixel-9-pro-xl-review" or close variant.
+  if (!reviewUrl) {
+    // Build a loose prefix: first 3+ meaningful words of the library slug
+    // "google-pixel-9-pro-xl" → check review slug contains "google" and "pixel" and "9"
+    const slugWords = librarySlug.split('-').filter(w => w.length > 0);
+    // Use first 3 words as a minimum match requirement
+    const matchWords = slugWords.slice(0, Math.min(4, slugWords.length));
+
+    $('a[href]').each((_, el) => {
+      if (reviewUrl) return;
+      let href = $(el).attr('href') || '';
+      if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+      if (!href.startsWith('https://www.notebookcheck.net')) return;
+      href = href.split('?')[0];
+      if (!/-review-/i.test(href)) return;
+      if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+
+      // The review slug must start with the device name words
+      const reviewSlug = (href.split('/').pop() || '').toLowerCase();
+      const allMatch = matchWords.every(w => reviewSlug.includes(w));
+      if (!allMatch) return;
+
+      reviewUrl = href;
+    });
+  }
+
+  // Strategy 3: Last resort — scan all links for any review URL whose slug starts
+  // with the full library slug prefix (exact match on the device name part)
+  if (!reviewUrl) {
+    $('a[href]').each((_, el) => {
+      if (reviewUrl) return;
+      let href = $(el).attr('href') || '';
+      if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
+      if (!href.startsWith('https://www.notebookcheck.net')) return;
+      href = href.split('?')[0];
+      if (!/-review-/i.test(href)) return;
+      if (!/\.\d{4,}\.0\.html$/.test(href)) return;
+      const reviewSlug = (href.split('/').pop() || '').toLowerCase();
+      if (reviewSlug.startsWith(librarySlug.slice(0, 10))) {
+        reviewUrl = href;
+      }
+    });
+  }
 
   const result = reviewUrl ?? libraryUrl;
-  // Cache the resolved URL
   await rSet(ck, result, RESOLVE_TTL);
   return result;
 }
@@ -402,6 +466,18 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
 }
 
 // ── SOURCE B: Chronological listing (library/external fallback) ───────────────
+//
+// KEY FIX: every new library URL is immediately resolved to its internal NBC
+// review URL (if one exists) before being stored in the index.
+// Previously crawlChronoPage stored library URLs raw and relied on a separate
+// migrateToReviewUrls step — meaning devices like Pixel 10 Pro XL ended up
+// with the minimised library/aggregator page instead of the full review page.
+//
+// Vercel safety: resolves in parallel batches of RESOLVE_CONCURRENCY.
+// Each resolveToReviewUrl does one HTTP fetch (~1-3s). With concurrency=5
+// and ~20 phones/page we need ~4-12s — well within the 30s Vercel limit.
+const RESOLVE_CONCURRENCY = 5;
+
 export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
   const t0 = Date.now();
   const chronoUrl = page === 1 ? NBC_CHRONO_BASE : `${NBC_CHRONO_BASE}?&ns_page=${page}`;
@@ -414,8 +490,6 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
   const entries = await loadEntries();
 
   // Build a set of device slug prefixes already covered by a review URL
-  // e.g. "samsung-galaxy-s25-ultra" from "Samsung-Galaxy-S25-Ultra-review-....html"
-  // Any chrono library URL matching this prefix is skipped — review already exists.
   const reviewPrefixes = new Set<string>();
   for (const u of Object.keys(entries)) {
     if (/-review-/i.test(u)) {
@@ -424,16 +498,61 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
     }
   }
 
-  let newUrls = 0;
+  // Filter to only new URLs not yet in the index and not already covered by a review
+  const toResolve: Array<{ url: string; title: string }> = [];
   for (const { url: u, title } of found) {
-    if (entries[u]) continue; // already in index
-    // Skip if a review URL for the same device already exists
+    if (entries[u]) continue;
     const slug = u.split('/').pop() || '';
     const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
     if (reviewPrefixes.has(prefix)) continue;
-    entries[u] = makeEntry(u, title);
-    newUrls++;
+    // Skip if we already have a review URL for the same device slug
+    // (e.g. library URL arrives after Source A already indexed the review URL)
+    if (/-review-/i.test(u)) {
+      // It's already a review URL — store directly
+      toResolve.push({ url: u, title });
+    } else {
+      toResolve.push({ url: u, title });
+    }
   }
+
+  let newUrls = 0;
+
+  // Resolve each library URL → internal review URL in parallel batches
+  for (let i = 0; i < toResolve.length; i += RESOLVE_CONCURRENCY) {
+    const batch = toResolve.slice(i, i + RESOLVE_CONCURRENCY);
+    await Promise.all(batch.map(async ({ url: libraryUrl, title }) => {
+      try {
+        // resolveToReviewUrl fetches the library page and finds the "-review-" link.
+        // Returns the internal review URL if found, else the original library URL.
+        const resolvedUrl = /-review-/i.test(libraryUrl)
+          ? libraryUrl  // already a review URL — no fetch needed
+          : await resolveToReviewUrl(libraryUrl);
+
+        const finalUrl = resolvedUrl || libraryUrl;
+
+        // If the resolved URL is already in the index (e.g. Source A already added it), skip
+        if (entries[finalUrl]) return;
+
+        // If resolved to a review URL, also check its prefix against existing reviews
+        if (finalUrl !== libraryUrl && /-review-/i.test(finalUrl)) {
+          const rSlug = finalUrl.split('/').pop() || '';
+          const rPrefix = rSlug.toLowerCase().split('-review-')[0];
+          // If we already have a different review for the same device, skip
+          if ([...Object.keys(entries)].some(u => /-review-/i.test(u) && u !== finalUrl && u.split('/').pop()?.toLowerCase().startsWith(rPrefix))) return;
+        }
+
+        entries[finalUrl] = makeEntry(finalUrl, title);
+        newUrls++;
+      } catch {
+        // On resolve failure, fall back to storing the library URL
+        if (!entries[libraryUrl]) {
+          entries[libraryUrl] = makeEntry(libraryUrl, title);
+          newUrls++;
+        }
+      }
+    }));
+  }
+
   if (newUrls > 0) await saveEntries(entries);
 
   const totalUrls = Object.keys(entries).length;

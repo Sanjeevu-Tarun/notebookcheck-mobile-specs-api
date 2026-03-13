@@ -884,6 +884,30 @@ app.get('/api/index/purge-library-duplicates', async (req, res) => {
   }
 });
 
+// /api/index/resolve-url — debug: show what resolveToReviewUrl returns for a library URL
+// ?url=https://www.notebookcheck.net/Google-Pixel-9-Pro-XL.873451.0.html
+// Use this to check if a device is getting its internal review URL correctly.
+app.get('/api/index/resolve-url', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: '"url" required' });
+  try {
+    const { resolveToReviewUrl } = await import('./src/notebookcheck_index') as any;
+    if (typeof resolveToReviewUrl !== 'function') {
+      return res.status(500).json({ success: false, error: 'resolveToReviewUrl is not exported — add it to exports in notebookcheck_index.ts' });
+    }
+    const resolved = await resolveToReviewUrl(url);
+    return res.json({
+      success: true,
+      input: url,
+      resolved,
+      isReviewUrl: /-review-/i.test(resolved),
+      changed: resolved !== url,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // /api/index/recover-review-urls — recover any review URLs accidentally deleted by purge
 // Scans nbc:review_resolve:* cache keys in Redis and re-adds missing review entries
 app.get('/api/index/recover-review-urls', async (req, res) => {
