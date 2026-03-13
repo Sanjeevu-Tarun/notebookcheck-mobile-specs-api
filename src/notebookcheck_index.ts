@@ -35,10 +35,11 @@ const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html'
 // NBC Library: device database pages (spec/aggregator pages for devices NBC tracks but
 // hasn't written a full review for, e.g. Vivo-X200.919417.0.html). These never appear
 // on the Smartphones listing but ARE discoverable via the Library filtered to smartphones.
-// NBC Library filtered to smartphones (stype=2). Paginated same as reviews listing.
-// This surfaces aggregator/spec pages (e.g. Vivo-X200.919417.0.html) that never appear
-// on the Smartphones reviews listing because NBC didn't write the review themselves.
-const NBC_LIBRARY_BASE  = 'https://www.notebookcheck.net/Library.279.0.html?stype=2';
+// NOTE: No second crawl source needed. extractPhoneUrls already handles both:
+//   - Full NBC review URLs:   "...-review.XXXXXX.0.html"
+//   - Aggregator/spec URLs:   "Brand-Model.XXXXXX.0.html" (looksLikePhoneModel match)
+// Both appear on Smartphones.155.0.html — aggregator pages are linked via "related devices".
+const NBC_LIBRARY_BASE = ''; // unused — kept for future use
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -248,35 +249,17 @@ export interface CrawlPageResult {
 
 export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const t0  = Date.now();
+  // Crawl the NBC smartphones listing. extractPhoneUrls now accepts both full review URLs
+  // (-review.XXXXXX.0.html) and aggregator/spec pages (Brand-Model.XXXXXX.0.html),
+  // so base models and non-reviewed devices are picked up automatically.
+  const url = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
+  const html = await fetchHtml(url);
+  const found = extractPhoneUrls(html);
 
-  // ── Source 1: Smartphones review listing (full NBC reviews, newest first) ──
-  const reviewsUrl  = page === 1 ? NBC_PHONES_BASE : `${NBC_PHONES_BASE}?&ns_page=${page}`;
-  // ── Source 2: NBC device library (aggregator/spec pages for devices NBC tracks
-  //    but hasn't reviewed itself — e.g. Vivo-X200.919417.0.html). These are
-  //    sorted by date added and paginate the same way as the reviews listing.
-  // Library base already has ?stype=2, so pagination appends &ns_page=N
-  const libraryUrl  = page === 1 ? NBC_LIBRARY_BASE : `${NBC_LIBRARY_BASE}&ns_page=${page}`;
-
-  // Fetch both sources in parallel — independent pages, no dependency between them
-  const [reviewsHtml, libraryHtml] = await Promise.all([
-    fetchHtml(reviewsUrl),
-    (async () => { try { return await fetchHtml(libraryUrl, 12000); } catch { return ''; } })(), // library best-effort
-  ]);
-
-  const foundFromReviews = extractPhoneUrls(reviewsHtml);
-  const foundFromLibrary = extractPhoneUrls(libraryHtml);
-
-  // Deduplicate across both sources (same URL may appear in both)
-  const seenUrls = new Set(foundFromReviews.map(f => f.url.toLowerCase()));
-  const dedupedLibrary = foundFromLibrary.filter(f => !seenUrls.has(f.url.toLowerCase()));
-  const found = [...foundFromReviews, ...dedupedLibrary];
-
-  // Page is done when BOTH sources return no links — a reviews page full of
-  // laptops is NOT done, only truly empty pages terminate the crawl
-  const reviewsEmpty = (reviewsHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length === 0;
-  const libraryEmpty = libraryHtml.length === 0 ||
-    (libraryHtml.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length === 0;
-  const pageIsEmpty = reviewsEmpty && libraryEmpty;
+  // Detect a truly empty/last page by counting ALL review links on the page,
+  // not just filtered phone URLs — a page full of laptops should NOT stop the crawl
+  const rawLinkCount = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = rawLinkCount === 0;
 
   const entries = await loadEntries();
   let newUrls = 0;
