@@ -344,6 +344,98 @@ setInterval(pingSearXNG, PING_INTERVAL_MS);
 setTimeout(() => warmProcCache().catch(() => {}), 5000); // 5s delay — let server fully boot first
 
 // Expose a manual ping trigger endpoint for debugging
+// /api/nbc/direct-debug?q=<device>
+// Shows exactly what NBC's own search returns — raw HTML links, scoring, timing.
+// Use this to verify NBC direct search is working before relying on it.
+// Example: /api/nbc/direct-debug?q=vivo+x300
+app.get('/api/nbc/direct-debug', async (req, res) => {
+  const q = (req.query.q as string) || 'vivo x300';
+  const t0 = Date.now();
+
+  try {
+    const { normalizeQuery, scoreCandidate } = await import('./src/notebookcheck');
+    const axios = (await import('axios')).default;
+    const cheerio = await import('cheerio');
+
+    const oq = q.trim();
+    const nq = normalizeQuery(q);
+    const primaryQuery = nq !== oq ? nq : oq;
+
+    // Hit NBC search directly — same URL the code uses
+    const searchUrl = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(primaryQuery)}`;
+    const fetchMs0 = Date.now();
+    let html = '';
+    let fetchError = '';
+    let httpStatus = 0;
+
+    try {
+      const resp = await axios.get(searchUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Referer': 'https://www.notebookcheck.net/',
+        },
+        timeout: 8000,
+      });
+      html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+      httpStatus = resp.status;
+    } catch (e: any) {
+      fetchError = e?.message;
+      httpStatus = e?.response?.status || 0;
+    }
+
+    const fetchMs = Date.now() - fetchMs0;
+
+    // Parse all links from the response
+    const allLinks: any[] = [];
+    const scoredLinks: any[] = [];
+
+    if (html) {
+      const $ = cheerio.load(html);
+      $('a[href]').each((_: any, el: any) => {
+        const href = $(el).attr('href') || '';
+        const fullUrl = href.startsWith('http') ? href
+          : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+        const text = $(el).text().trim();
+
+        if (!fullUrl.includes('notebookcheck.net')) return;
+
+        // Show ALL NBC links — even ones that fail the article-ID filter
+        allLinks.push({ url: fullUrl, text: text.slice(0, 80) });
+
+        // Only score article links
+        if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
+        if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
+        if (/\/(Topics|Search|Smartphones|RSS|index)\.\d/i.test(fullUrl)) return;
+        if (!text || text.length < 3) return;
+
+        const score = (scoreCandidate as Function)(text, fullUrl, nq, oq);
+        scoredLinks.push({ score, url: fullUrl, title: text.slice(0, 100), passed: score >= 0 });
+      });
+    }
+
+    scoredLinks.sort((a: any, b: any) => b.score - a.score);
+
+    return res.json({
+      query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
+      searchUrl,
+      httpStatus,
+      fetchError: fetchError || null,
+      fetchMs,
+      totalMs: Date.now() - t0,
+      html: {
+        length: html.length,
+        snippet: html.slice(0, 300),   // first 300 chars — shows if it's the right page
+      },
+      allNBCLinks: allLinks.slice(0, 20),       // all NBC links found (pre-filter)
+      scoredArticleLinks: scoredLinks.slice(0, 10), // scored article links
+      winner: scoredLinks.find((l: any) => l.passed) || null,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ error: e.message, totalMs: Date.now() - t0 });
+  }
+});
+
 app.get('/api/nbc/keepalive', async (_, res) => {
   const t0 = Date.now();
   try {
