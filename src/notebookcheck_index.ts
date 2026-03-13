@@ -30,7 +30,7 @@ const LOCK_TTL      = 300;
 
 // SOURCE A — NBC Smartphones review listing (internal NBC reviews only, ~80 pages)
 // Each entry has "-review-" in its slug and contains full benchmarks/specs/images.
-const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Smartphones.155.0.html';
+const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html?&items_per_page=100&hide_youtube=1&hide_external_reviews=1&showHighlightedTags=1&tagArray%5B%5D=10&typeArray%5B%5D=1&id=55';
 
 // SOURCE B — Chronological listing (all device types, library/external pages)
 // Used only for phones that NBC hasn't written their own review for yet.
@@ -335,7 +335,7 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
 //  SOURCE A: crawlReviewsPage(page)
 //    NBC Smartphones review listing — internal NBC reviews only (~80 pages).
 //    These have "-review-" in their slug and contain full benchmarks/specs/images.
-//    Pagination: ?p=N (1-indexed)
+//    Pagination: page 0 = no ns_page param, page 1+ = &ns_page=N
 //
 //  SOURCE B: crawlChronoPage(page)
 //    Chronological listing — all device types including library/external pages.
@@ -358,7 +358,7 @@ function makeEntry(url: string, title: string): IndexEntry {
 // ── SOURCE A: NBC Smartphones reviews listing ─────────────────────────────────
 export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   const t0 = Date.now();
-  const url = page === 1 ? NBC_REVIEWS_BASE : `${NBC_REVIEWS_BASE}?p=${page}`;
+  const url = page === 0 ? NBC_REVIEWS_BASE : `${NBC_REVIEWS_BASE}&ns_page=${page}`;
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 

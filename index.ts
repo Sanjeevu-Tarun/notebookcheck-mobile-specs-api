@@ -1522,7 +1522,7 @@ app.get('/recrawl', (_, res) => {
     </div>
     <div class="ctl">
       <label>start page</label>
-      <input type="number" id="aStart" value="1" min="1" max="80">
+      <input type="number" id="aStart" value="0" min="0" max="80">
       <button class="btn btn-go" id="btnStartA" onclick="startA()">▶ Start</button>
       <button class="btn btn-stop" id="btnStopA" style="display:none" onclick="stopA()">■ Stop</button>
     </div>
