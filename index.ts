@@ -39,7 +39,7 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v4-177
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
-// Uses Brave + SearXNG search, guaranteed <5seconds response
+// Uses Brave + SearXNG search, guaranteed <5s response
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
   const q = req.query.q as string;
@@ -633,11 +633,18 @@ app.get('/api/index/crawl', async (req, res) => {
   const startPage = parseInt(req.query.startPage as string || '1');
   const maxPages  = Math.min(parseInt(req.query.maxPages as string || '40'), 100);
   const delayMs   = parseInt(req.query.delayMs as string || '600');
-  const force     = req.query.force === 'true';
 
-  // Always reset the lock before starting so stale locks never block crawls.
-  // The lock is re-acquired inside crawlSync per batch with an appropriate TTL.
-  if (force || startPage === 1) await resetCrawlLock();
+  // Always force-delete lock directly via Redis REST before crawling.
+  // resetCrawlLock() used broken GET /del — this uses POST /pipeline which actually works.
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    await axios2.post(`${rUrl}/pipeline`, [
+      ['DEL', 'nbc:index:v3:crawl_lock'],
+      ['DEL', 'nbc:index:v3:crawl_progress'],
+    ], { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' } });
+  } catch { /* ignore — crawlSync will handle it */ }
 
   try {
     const stats = await crawlSync(startPage, maxPages, delayMs);
@@ -921,7 +928,6 @@ app.get('/api/debug/redis-force-unlock', async (req, res) => {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
-<<<<<<< HEAD
 
 // /api/debug/crawl-direct — bypass all lock logic, crawl page 1 directly
 app.get('/api/debug/crawl-direct', async (req, res) => {
@@ -955,5 +961,3 @@ app.get('/api/debug/crawl-direct', async (req, res) => {
     return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 500) });
   }
 });
-=======
->>>>>>> 33b75c7d5bdbb2e162fb7260bc75bebb9e4677a5
