@@ -86,9 +86,17 @@ async function rSet(k: string, v: unknown, ttl = 86400): Promise<void> {
 async function rDel(k: string): Promise<void> {
   try {
     const { url, token } = rBase();
-    await _rax.get(`${url}/del/${encodeURIComponent(k)}`,
-      { headers: { Authorization: `Bearer ${token}` } });
+    await _rax.post(`${url}/pipeline`,
+      [['DEL', k]],
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
   } catch { /* ignore */ }
+}
+
+async function rDelForce(keys: string[]): Promise<void> {
+  const { url, token } = rBase();
+  await _rax.post(`${url}/pipeline`,
+    keys.map(k => ['DEL', k]),
+    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
 }
 
 async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
@@ -244,13 +252,12 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
 export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Promise<CrawlStats & { nextPage: number | null }> {
   const t0 = Date.now();
 
-  // Always try to acquire (or refresh) the crawl lock for every batch.
-  // For startPage > 1 the previous batch released the lock, so we re-acquire here.
-  // Use a generous TTL: 60s per page + 60s buffer, capped at 3600s.
+  // Force-clear any stale lock before acquiring — prevents permanent lock-out.
+  try { await rDelForce([LOCK_KEY, PROGRESS_KEY]); } catch { /* ignore */ }
+
   const dynamicTtl = Math.min(maxPages * 60 + 60, 3600);
   const locked = await rSetNX(LOCK_KEY, '1', dynamicTtl);
   if (!locked) {
-    // Lock exists — another process is actively crawling right now.
     const stats = await getLastCrawlStats();
     return {
       ...(stats ?? { totalPages: 0, totalUrls: 0, newUrls: 0, crawlMs: 0, lastCrawledAt: new Date().toISOString() }),
@@ -276,23 +283,17 @@ export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Pr
       page++;
     }
 
-    // nextPage: null means the crawl reached the end of all pages.
-    // Otherwise return the next page number so the caller can continue.
     const nextPage = crawlDone ? null : page + 1;
-
     const stats: CrawlStats & { nextPage: number | null } = {
       totalPages: pagesRead, totalUrls: lastTotalUrls, newUrls,
       crawlMs: Date.now() - t0, lastCrawledAt: new Date().toISOString(), nextPage,
     };
-
     await rSet(STATS_KEY, stats, ENTRIES_TTL);
-    // Always release the lock after this batch so the next batch can acquire it.
-    await rDel(LOCK_KEY);
-    if (!nextPage) await rDel(PROGRESS_KEY);
+    await rDelForce([LOCK_KEY, PROGRESS_KEY]);
     return stats;
 
   } catch (e: any) {
-    await rDel(LOCK_KEY);
+    await rDelForce([LOCK_KEY, PROGRESS_KEY]);
     const stats: CrawlStats & { nextPage: number | null } = {
       totalPages: pagesRead, totalUrls: lastTotalUrls, newUrls,
       crawlMs: Date.now() - t0, lastCrawledAt: new Date().toISOString(),
