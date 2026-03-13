@@ -887,3 +887,37 @@ app.get('/api/debug/redis', async (req, res) => {
 });
 
 module.exports = app;
+// /api/debug/redis-force-unlock — directly delete ALL crawl lock keys from Redis
+app.get('/api/debug/redis-force-unlock', async (req, res) => {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return res.status(500).json({ success: false, error: 'Redis env vars missing' });
+
+  try {
+    const axios2 = (await import('axios')).default;
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    // Delete all possible lock key versions (v1, v2, v3)
+    const keys = [
+      'nbc:index:v1:crawl_lock', 'nbc:index:v1:crawl_progress',
+      'nbc:index:v2:crawl_lock', 'nbc:index:v2:crawl_progress',
+      'nbc:index:v3:crawl_lock', 'nbc:index:v3:crawl_progress',
+    ];
+    const pipeline = keys.map(k => ['DEL', k]);
+    await axios2.post(`${url}/pipeline`, pipeline, { headers });
+
+    // Verify lock is gone
+    const check = await axios2.get(`${url}/get/${encodeURIComponent('nbc:index:v3:crawl_lock')}`, { headers });
+    const lockVal = check.data?.result;
+
+    return res.json({
+      success: true,
+      deleted: keys,
+      lockStillExists: lockVal !== null,
+      lockValue: lockVal,
+      hint: lockVal === null ? '✅ Lock is gone — safe to crawl now' : '❌ Lock still exists',
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
