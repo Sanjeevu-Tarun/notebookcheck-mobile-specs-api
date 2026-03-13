@@ -39,7 +39,7 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
-// Uses Brave + SearXNG search, guaranteed <5s response
+// Uses Brave + SearXNG search, guaranteed <5seconds response
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/api/phone', async (req, res) => {
   const q = req.query.q as string;
