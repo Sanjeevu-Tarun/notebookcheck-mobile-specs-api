@@ -46,11 +46,45 @@ app.get('/api/phone', async (req, res) => {
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
 
   try {
+    // Step 1: Try to find a matching URL in the crawled index first
+    const { getIndexEntries, scrapeIndexedDevice } = await import('./src/notebookcheck_index');
+    const qLower = q.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const qTokens = qLower.split(' ').filter((t: string) => t.length >= 2);
+
+    const { entries } = await getIndexEntries({ status: 'all', limit: 200 });
+
+    // Score each entry by how many query tokens match the title/slug
+    let best: any = null;
+    let bestScore = 0;
+    for (const entry of entries) {
+      const haystack = (entry.title + ' ' + entry.slug).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+      const score = qTokens.filter((t: string) => haystack.includes(t)).length;
+      if (score > bestScore) { bestScore = score; best = entry; }
+    }
+
+    // If we have a good match (at least half the tokens matched), scrape it from index
+    if (best && bestScore >= Math.ceil(qTokens.length * 0.5)) {
+      // Check if already scraped and cached
+      if (best.status === 'done') {
+        // Re-scrape to get full data (index only stores metadata, not full scrape)
+        const result = await scrapeIndexedDevice(best.url);
+        if (result.success) {
+          return res.json({ success: true, source: 'index', matchedUrl: best.url, matchScore: bestScore, data: result.data });
+        }
+      }
+      // Not yet scraped — scrape it now
+      const result = await scrapeIndexedDevice(best.url);
+      if (result.success) {
+        return res.json({ success: true, source: 'index', matchedUrl: best.url, matchScore: bestScore, data: result.data });
+      }
+    }
+
+    // Step 2: Fall back to live search if index has no match
     const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
     const data = await getNotebookCheckDataFast(q);
-    
     if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    return res.json({ success: true, source: 'notebookcheck', data });
+    return res.json({ success: true, source: 'notebookcheck_live', data });
+
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
