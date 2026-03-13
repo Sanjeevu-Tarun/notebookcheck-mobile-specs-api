@@ -33,6 +33,7 @@ import {
   searchIndex,
   migrateToReviewUrls,
   resetMigration,
+  purgeLibraryDuplicates,
   type CrawlPageResult,
   type MigrateResult,
 } from './src/notebookcheck_index';
@@ -852,7 +853,15 @@ app.get('/api/index/migrate-review-urls', async (req, res) => {
   }
 });
 
-// /api/index/reset-url — reset one URL to pending
+// /api/index/purge-library-duplicates — delete all library URLs that have a review URL for same device
+app.get('/api/index/purge-library-duplicates', async (req, res) => {
+  try {
+    const result = await purgeLibraryDuplicates();
+    return res.json({ success: true, ...result });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
 app.get('/api/index/reset-url', async (req, res) => {
   const url = req.query.url as string;
   if (!url) return res.status(400).json({ success: false, error: '"url" required' });
@@ -958,7 +967,15 @@ app.get('/migrate', (req, res) => {
       while (true) {
         const done = await runBatch();
         if (done) {
-          log('🎉 All done! Search index rebuilt.', 'done');
+          log('🧹 Purging stale library duplicates…', 'ok');
+          try {
+            const pr = await fetch('/api/index/purge-library-duplicates');
+            const pj = await pr.json();
+            log('🗑 Purged ' + pj.purged + ' library duplicates. ' + pj.kept + ' entries remain.', 'ok');
+          } catch(pe) {
+            log('Purge warning: ' + pe.message, 'err');
+          }
+          log('🎉 All done! Search index rebuilt. Only internal review URLs remain.', 'done');
           document.getElementById('status').textContent = '✅ Migration complete!';
           document.getElementById('done-banner').style.display = 'block';
           document.getElementById('btn').textContent = '✅ Done';

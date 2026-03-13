@@ -471,9 +471,56 @@ const SEARCH_INDEX_KEY = `nbc:index:v4:search_index`;
 
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
-  // Store raw title (snippet included) — cleanIndexTitle() strips it at query time
-  const flat = Object.values(entries).map((e: IndexEntry) => ({ url: e.url, title: e.title, slug: e.slug }));
+
+  // Deduplicate: for each device title, always prefer the NBC internal review URL
+  // (slug contains "-review-") over the library/aggregator URL.
+  // This guards against stale library entries coexisting with upgraded review entries.
+  const byTitle = new Map<string, IndexEntry>();
+  for (const e of Object.values(entries) as IndexEntry[]) {
+    const key = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    const existing = byTitle.get(key);
+    const isReview = /-review-/i.test(e.url);
+    if (!existing) {
+      byTitle.set(key, e);
+    } else if (isReview && !/-review-/i.test(existing.url)) {
+      byTitle.set(key, e); // upgrade to review URL
+    }
+  }
+
+  const flat = Array.from(byTitle.values()).map((e: IndexEntry) => ({ url: e.url, title: e.title, slug: e.slug }));
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
+}
+
+// Purge all library/aggregator entries from the index that already have a corresponding
+// internal review URL stored for the same device title.
+// Run this after migration to clean up stale library entries from Redis.
+export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: number }> {
+  const entries = await loadEntries();
+
+  // Build a set of normalised titles that have a review URL
+  const reviewTitles = new Set<string>();
+  for (const e of Object.values(entries) as IndexEntry[]) {
+    if (/-review-/i.test(e.url)) {
+      reviewTitles.add(e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim());
+    }
+  }
+
+  // Delete any library entry whose title already has a review URL
+  let purged = 0;
+  for (const [url, e] of Object.entries(entries)) {
+    if (!/-review-/i.test(url)) {
+      const key = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+      if (reviewTitles.has(key)) {
+        delete entries[url];
+        purged++;
+      }
+    }
+  }
+
+  await saveEntries(entries);
+  await rebuildSearchIndex();
+
+  return { purged, kept: Object.keys(entries).length };
 }
 
 // Normalise the stored title for matching.
