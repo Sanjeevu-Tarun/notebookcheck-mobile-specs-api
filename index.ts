@@ -961,3 +961,86 @@ app.get('/api/debug/crawl-direct', async (req, res) => {
     return res.status(500).json({ success: false, error: e.message, stack: e.stack?.slice(0, 500) });
   }
 });
+
+// /crawler — self-hosted auto-crawler UI
+app.get('/crawler', (_, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NBC Crawler</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
+  :root{--bg:#0a0a0f;--surface:#12121a;--border:#1e1e2e;--accent:#00ff87;--accent2:#0ff;--danger:#ff4d6d;--warn:#ffd166;--text:#e0e0f0;--muted:#555570}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;min-height:100vh;padding:2rem}
+  body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 20%,rgba(0,255,135,.04),transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(0,255,255,.03),transparent 60%);pointer-events:none}
+  h1{font-family:'Syne',sans-serif;font-size:clamp(1.8rem,4vw,2.8rem);font-weight:800;background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:.25rem}
+  .subtitle{color:var(--muted);font-size:.75rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:2rem}
+  .controls{display:flex;gap:.75rem;margin-bottom:1.5rem;flex-wrap:wrap;align-items:center}
+  .btn{padding:.65rem 1.5rem;border-radius:6px;border:none;font-family:'JetBrains Mono',monospace;font-size:.85rem;font-weight:700;cursor:pointer;transition:all .15s}
+  .btn-start{background:var(--accent);color:#000}.btn-start:hover{background:#00e87a}.btn-start:disabled{background:var(--muted);color:var(--bg);cursor:not-allowed}
+  .btn-stop{background:transparent;border:1px solid var(--danger);color:var(--danger)}.btn-stop:hover{background:var(--danger);color:#fff}
+  .btn-unlock{background:transparent;border:1px solid var(--warn);color:var(--warn);font-size:.75rem;padding:.5rem 1rem}.btn-unlock:hover{background:var(--warn);color:#000}
+  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1rem;margin-bottom:1.5rem}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem;transition:border-color .3s}
+  .stat-card.active{border-color:var(--accent)}
+  .stat-label{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.4rem}
+  .stat-value{font-size:1.6rem;font-weight:700;font-family:'Syne',sans-serif;color:var(--accent)}
+  .stat-value.muted{color:var(--muted)}.stat-value.danger{color:var(--danger)}
+  .progress-bar-wrap{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:1rem 1.5rem;margin-bottom:1.5rem}
+  .progress-info{display:flex;justify-content:space-between;margin-bottom:.6rem;font-size:.75rem}
+  .progress-track{height:6px;background:var(--border);border-radius:99px;overflow:hidden}
+  .progress-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent2));border-radius:99px;transition:width .5s ease;width:0%}
+  .log-wrap{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .log-header{padding:.75rem 1rem;border-bottom:1px solid var(--border);font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;justify-content:space-between}
+  .log-body{height:320px;overflow-y:auto;padding:.75rem 1rem;font-size:.75rem;line-height:1.8}
+  .log-body::-webkit-scrollbar{width:4px}.log-body::-webkit-scrollbar-track{background:var(--bg)}.log-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px}
+  .log-line{display:flex;gap:.75rem}.log-time{color:var(--muted);flex-shrink:0}
+  .log-msg.ok{color:var(--accent)}.log-msg.info{color:var(--text)}.log-msg.warn{color:var(--warn)}.log-msg.err{color:var(--danger)}.log-msg.done{color:var(--accent2)}
+  .pulse{display:inline-block;width:8px;height:8px;background:var(--accent);border-radius:50%;animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+  #statusBadge{font-size:.75rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<h1>NBC Crawler</h1>
+<p class="subtitle">NotebookCheck Auto-Crawler — one page at a time, Vercel-safe</p>
+<div class="controls">
+  <button class="btn btn-unlock" onclick="unlock()">🔓 Unlock</button>
+  <button class="btn btn-start" id="btnStart" onclick="startCrawl()">▶ Start Crawling</button>
+  <button class="btn btn-stop" id="btnStop" onclick="stopCrawl()" style="display:none">■ Stop</button>
+  <span id="statusBadge">Idle</span>
+  <span id="logIndicator"></span>
+</div>
+<div class="stats-grid">
+  <div class="stat-card" id="cardPages"><div class="stat-label">Pages Crawled</div><div class="stat-value muted" id="statPages">0</div></div>
+  <div class="stat-card"><div class="stat-label">Total URLs</div><div class="stat-value muted" id="statUrls">0</div></div>
+  <div class="stat-card"><div class="stat-label">New This Run</div><div class="stat-value muted" id="statNew">0</div></div>
+  <div class="stat-card"><div class="stat-label">Current Page</div><div class="stat-value muted" id="statPage">—</div></div>
+  <div class="stat-card"><div class="stat-label">Errors</div><div class="stat-value muted" id="statErrors">0</div></div>
+  <div class="stat-card"><div class="stat-label">Elapsed</div><div class="stat-value muted" id="statElapsed">0s</div></div>
+</div>
+<div class="progress-bar-wrap">
+  <div class="progress-info"><span id="progressLabel">Ready to crawl</span><span id="progressPct">0%</span></div>
+  <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+</div>
+<div class="log-wrap">
+  <div class="log-header"><span>Activity Log</span><span id="logIndicator2"></span></div>
+  <div class="log-body" id="logBody"></div>
+</div>
+<script>
+  let running=false,currentPage=1,totalPages=0,totalUrls=0,totalNew=0,errors=0,startTime=null,elapsedTimer=null,stopRequested=false;
+  const base='';// same origin — no CORS issues
+  function log(msg,type='info'){const b=document.getElementById('logBody'),now=new Date().toLocaleTimeString(),l=document.createElement('div');l.className='log-line';l.innerHTML=\`<span class="log-time">\${now}</span><span class="log-msg \${type}">\${msg}</span>\`;b.appendChild(l);b.scrollTop=b.scrollHeight}
+  function setStatus(msg,active=false){const s=document.getElementById('statusBadge'),i=document.getElementById('logIndicator2');s.textContent=msg;s.style.color=active?'var(--accent)':'var(--muted)';i.innerHTML=active?'<span class="pulse"></span>':''}
+  function updateStats(){document.getElementById('statPages').textContent=totalPages;document.getElementById('statUrls').textContent=totalUrls;document.getElementById('statNew').textContent=totalNew;document.getElementById('statPage').textContent=currentPage;const e=document.getElementById('statErrors');e.textContent=errors;e.className='stat-value '+(errors>0?'danger':'muted');document.getElementById('statPages').className='stat-value '+(totalPages>0?'':'muted');document.getElementById('statUrls').className='stat-value '+(totalUrls>0?'':'muted')}
+  async function unlock(){log('Unlocking...','warn');try{const r=await fetch('/api/debug/redis-force-unlock'),d=await r.json();log(d.hint?.includes('✅')?'✅ Lock cleared':'Lock: '+JSON.stringify(d),d.hint?.includes('✅')?'ok':'warn')}catch(e){log('Unlock failed: '+e.message,'err')}}
+  async function startCrawl(){if(running)return;running=true;stopRequested=false;startTime=Date.now();currentPage=1;document.getElementById('btnStart').disabled=true;document.getElementById('btnStop').style.display='inline-block';setStatus('Crawling...',true);elapsedTimer=setInterval(()=>{const s=Math.round((Date.now()-startTime)/1000);document.getElementById('statElapsed').textContent=s+'s';document.getElementById('statElapsed').className='stat-value'},1000);try{await fetch('/api/debug/redis-force-unlock');log('🔓 Lock cleared','ok')}catch{}log('Starting crawl...','info');while(!stopRequested){try{document.getElementById('cardPages').classList.add('active');const resp=await fetch(\`/api/index/crawl-page?page=\${currentPage}\`);if(!resp.ok){log(\`Page \${currentPage} HTTP \${resp.status}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const data=await resp.json();if(!data.success){log(\`Page \${currentPage}: \${data.error||'error'}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,2000));currentPage++;continue}const result=data.result;totalPages++;totalUrls=result.totalUrls;totalNew+=result.newUrls;updateStats();const pct=Math.min(Math.round(currentPage/200*100),99);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('progressPct').textContent=pct+'%';document.getElementById('progressLabel').textContent=\`Page \${currentPage} crawled\`;log(\`Page \${currentPage} → \${result.phonesFound} phones, \${result.newUrls} new (total: \${result.totalUrls})\`,result.newUrls>0?'ok':'info');if(result.done){log(\`🎉 Done! \${totalUrls} URLs indexed across \${totalPages} pages.\`,'done');document.getElementById('progressFill').style.width='100%';document.getElementById('progressPct').textContent='100%';document.getElementById('progressLabel').textContent='Crawl complete!';break}currentPage++;await new Promise(r=>setTimeout(r,800))}catch(e){log(\`Page \${currentPage} failed: \${e.message}\`,'err');errors++;updateStats();await new Promise(r=>setTimeout(r,3000));currentPage++}}if(stopRequested)log(\`⏹ Stopped at page \${currentPage}. \${totalUrls} URLs so far.\`,'warn');running=false;clearInterval(elapsedTimer);document.getElementById('btnStart').disabled=false;document.getElementById('btnStart').textContent='▶ Resume';document.getElementById('btnStop').style.display='none';document.getElementById('cardPages').classList.remove('active');setStatus('Done',false)}
+  function stopCrawl(){stopRequested=true;setStatus('Stopping...',false);log('Stop requested...','warn')}
+</script>
+</body>
+</html>`);
+});
