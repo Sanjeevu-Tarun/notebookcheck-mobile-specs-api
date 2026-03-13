@@ -295,7 +295,6 @@ app.get('/', (_, res) => res.json({
     nbcSuggestions:   '/api/nbc/suggestions?q=<device>',
     nbcDebug:         '/api/nbc/debug?q=<device>',
     nbcSearxngDebug:  '/api/nbc/searxng-debug?q=<device>',
-    nbcListingDebug:  '/api/nbc/listing-debug?q=<device>[&step=1|2|3]',
     nbcRace:          '/api/nbc/race?q=<device>',
     // Processor / SoC
     processor:            '/api/processor?q=<chip>',
@@ -362,19 +361,29 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     const nq = normalizeQuery(q);
     const primaryQuery = nq !== oq ? nq : oq;
 
-    // Hit NBC search directly — same URL the code uses
-    const searchUrl = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(primaryQuery)}`;
+    // Hit NBC search directly via POST — NBC uses TYPO3 Indexed Search.
+    // GET ?word= is silently ignored by TYPO3; the correct field is
+    // tx_indexedsearch_pi2[search][sword] submitted as POST form data.
+    const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
+    const postBody = new URLSearchParams({
+      'tx_indexedsearch_pi2[search][sword]': primaryQuery,
+      'tx_indexedsearch_pi2[action]': 'search',
+    }).toString();
+    const searchUrl = NBC_SEARCH_URL; // for the response payload (method is POST)
     const fetchMs0 = Date.now();
     let html = '';
     let fetchError = '';
     let httpStatus = 0;
 
     try {
-      const resp = await axios.get(searchUrl, {
+      const resp = await axios.post(NBC_SEARCH_URL, postBody, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Referer': 'https://www.notebookcheck.net/',
+          'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Content-Type':    'application/x-www-form-urlencoded',
+          'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer':         'https://www.notebookcheck.net/',
+          'Origin':          'https://www.notebookcheck.net',
         },
         timeout: 8000,
       });
@@ -432,6 +441,8 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     return res.json({
       query: { original: oq, normalized: nq, primaryUsed: primaryQuery },
       searchUrl,
+      searchMethod: 'POST',
+      searchBody: postBody,
       httpStatus,
       fetchError: fetchError || null,
       fetchMs,
@@ -446,149 +457,6 @@ app.get('/api/nbc/direct-debug', async (req, res) => {
     });
   } catch (e: any) {
     return res.status(500).json({ error: e.message, totalMs: Date.now() - t0 });
-  }
-});
-
-
-// ─────────────────────────────────────────────────────────────────────────────
-// /api/nbc/listing-debug?q=<device>[&step=1|2|3]
-//
-// Tests the NBC listing-index strategy independently — does NOT touch any
-// existing search path (SearXNG, searchViaNBC). Safe to call at any time.
-//
-// step=1  Fetch page 1 — check it loads, size, snippet, is it a real listing?
-// step=2  Dump all pagination hrefs found on page 1 (debug pagination detection)
-// step=3  Full index build across all pages + score against query
-// (omit step for full run = steps 1+2+3)
-// ─────────────────────────────────────────────────────────────────────────────
-app.get('/api/nbc/listing-debug', async (req, res) => {
-  const q    = (req.query.q as string) || 'samsung galaxy s25';
-  const step = req.query.step ? parseInt(req.query.step as string, 10) : 0;
-  const t0   = Date.now();
-
-  try {
-    const axios   = (await import('axios')).default;
-    const cheerio = await import('cheerio');
-    const NBC     = 'https://www.notebookcheck.net/Smartphones.8.0.html';
-    const UA      = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-
-    const fetchPage = async (url: string) => {
-      const t = Date.now();
-      const r = await axios.get(url, {
-        headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Referer': 'https://www.notebookcheck.net/' },
-        timeout: 12000, decompress: true,
-      });
-      const html = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
-      return { html, status: r.status, ms: Date.now() - t };
-    };
-
-    const extractLinks = (html: string) => {
-      const $ = cheerio.load(html);
-      const out: {url:string;title:string}[] = [];
-      const seen = new Set<string>();
-      $('a[href]').each((_:any, el:any) => {
-        const href = $(el).attr('href') || '';
-        const full = href.startsWith('http') ? href : href.startsWith('/') ? 'https://www.notebookcheck.net'+href : '';
-        if (!full.includes('notebookcheck.net')) return;
-        if (!/\.\d{4,}\.0\.html/.test(full)) return;
-        if (seen.has(full)) return;
-        if (/[?&](tag|q|word|id)=/.test(full)) return;
-        if (/\/(Smartphones|Topics|Search|RSS|index|News)\.\d/i.test(full)) return;
-        if (!/[A-Za-z]{3}.*\.\d{5,}\.0\.html/.test(full)) return;
-        const title = ($(el).text()||$(el).attr('title')||'').replace(/\s+/g,' ').trim();
-        if (!title||title.length<4||title.length>200) return;
-        seen.add(full);
-        out.push({url:full,title});
-      });
-      return out;
-    };
-
-    const extractPagination = (html: string) => {
-      const $ = cheerio.load(html);
-      const urls = new Set<string>();
-      $('a[href]').each((_:any, el:any) => {
-        const href = $(el).attr('href')||'';
-        if (!href||href===NBC||href==='/Smartphones.8.0.html') return;
-        const ok = (href.includes('Smartphones.8')&&href!==NBC)
-          ||(href.includes('Smartphones')&&/[?&@]/.test(href))
-          ||(/\/@\d/.test(href)&&href.toLowerCase().includes('smartphone'));
-        if (!ok) return;
-        const full = href.startsWith('http')?href:href.startsWith('/')?'https://www.notebookcheck.net'+href:'';
-        if (full) urls.add(full);
-      });
-      return [...urls];
-    };
-
-    const scoreMatch = (title:string, url:string, query:string) => {
-      const q=query.toLowerCase(), t=title.toLowerCase();
-      const slug=url.split('/').pop()!.replace(/\.\d+\.0\.html$/,'').replace(/-/g,' ').toLowerCase();
-      const combined=t+' '+slug;
-      const words=q.split(/\s+/).filter((w:string)=>w.length>1);
-      if (!words.every((w:string)=>combined.includes(w))) return -1;
-      let sc=100;
-      if (combined.includes(q)) sc+=800;
-      if (slug.includes(q.replace(/\s+/g,'-'))) sc+=600;
-      if (url.includes('-review')) sc+=300;
-      const variants=['ultra','pro','plus','max','mini','lite','xl','fold','flip','fe','se','5g','4g'];
-      for (const v of variants){
-        const re=new RegExp('\\b'+v+'\\b','i');
-        if (!re.test(q)&&re.test(combined)) sc-=400;
-        if (re.test(q)&&!re.test(combined)) sc-=600;
-      }
-      return sc;
-    };
-
-    // STEP 1 — raw page fetch
-    const { html: p1html, status: p1status, ms: p1ms } = await fetchPage(NBC);
-    const step1 = {
-      url: NBC, httpStatus: p1status, fetchMs: p1ms,
-      htmlBytes: p1html.length,
-      isErrorPage: p1html.includes('an error occurred')||p1html.length<5000,
-      htmlSnippet: p1html.slice(0,300),
-    };
-    if (step===1) return res.json({step:1, ...step1, totalMs:Date.now()-t0});
-
-    // STEP 2 — pagination detection
-    const allHrefs: string[] = [];
-    { const $=cheerio.load(p1html); $('a[href]').each((_:any,el:any)=>{const h=$(el).attr('href')||'';if(h&&!allHrefs.includes(h))allHrefs.push(h);}); }
-    const paginationUrls = extractPagination(p1html);
-    const step2 = {
-      totalHrefs: allHrefs.length,
-      smartphoneHrefs: allHrefs.filter(h=>/smartphone/i.test(h)),
-      pageParamHrefs: allHrefs.filter(h=>/[?&@](page|cp|offset|currentPage|tx_|p=)/.test(h)||/\/@\d/.test(h)),
-      paginationUrls, paginationCount: paginationUrls.length,
-    };
-    if (step===2) return res.json({step:2, ...step2, totalMs:Date.now()-t0});
-
-    // STEP 3 — full index + match
-    const p1links = extractLinks(p1html);
-    const extraPages = paginationUrls.slice(0,60);
-    const tIdx = Date.now();
-    const settled = await Promise.allSettled(
-      extraPages.map(url=>fetchPage(url).then(r=>extractLinks(r.html)).catch(()=>[] as {url:string;title:string}[]))
-    );
-    const all = new Map<string,{url:string;title:string}>();
-    for (const e of p1links) all.set(e.url,e);
-    for (const r of settled) if (r.status==='fulfilled') for (const e of r.value) all.set(e.url,e);
-    const fullIndex = [...all.values()];
-
-    const scored = fullIndex
-      .map(e=>({...e,score:scoreMatch(e.title,e.url,q)}))
-      .filter(e=>e.score>=0)
-      .sort((a,b)=>b.score-a.score);
-
-    const step3 = {
-      pagesScraped: 1+extraPages.length, indexSize: fullIndex.length,
-      indexBuildMs: Date.now()-tIdx, matchCount: scored.length,
-      top5: scored.slice(0,5), winner: scored[0]||null,
-    };
-    return res.json({
-      query:q, step1_fetch:step1, step2_pagination:step2,
-      step3_index:step3, totalMs:Date.now()-t0,
-    });
-
-  } catch(e:any) {
-    return res.status(500).json({error:e.message, stack:e.stack?.slice(0,400), totalMs:Date.now()-t0});
   }
 });
 

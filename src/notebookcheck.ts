@@ -299,7 +299,7 @@ export interface NBCDebugResult {
 //  4. bodyText truncation removed — full normalised body used for all regex passes.
 //  5. resolveSearchResult() is fully synchronous — no extra HTTP round-trip.
 //     getReviewFromDevicePage (was ~2–3s extra latency) removed entirely.
-  //  6. searchViaNBC removed — listing index is the primary search path.
+//  6. searchViaNBCSearch removed — SearXNG is the sole search path.
 //  7. scrapeNotebookCheckDevice() accepts optional AbortSignal.
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -731,182 +731,8 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEARCH: NBC LISTING INDEX — truly unlimited, zero external dependencies
-//
-// WHY NBC's OWN SEARCH DOESN'T WORK:
-//   /Search.8222.0.html is a Google Custom Search Engine widget.
-//   The server HTML is always an empty shell — results load client-side via
-//   JavaScript XHR to Google. GET/POST to that page never returns review links.
-//   This is identical to why GSMArena search works (server HTML) and NBC's
-//   search doesn't — NBC outsourced search to Google CSE.
-//
-// WHY THE LISTING PAGE WORKS (same reason GSMArena works):
-//   /Smartphones.8.0.html is plain server-rendered TYPO3 HTML — every
-//   smartphone review linked directly, paginated, no JavaScript required.
-//   Pattern: identical to GSMArena's /results.php3 which works perfectly.
-//   No JavaScript, no HMAC tokens, no auth, no bot detection, no rate limits.
-//
-// STRATEGY (mirrors GSMArena's approach exactly):
-//   1. Scrape all pages of /Smartphones.8.0.html in parallel (~10-30 pages).
-//   2. Build an in-memory index of {url, title} for every review (~300-600 items).
-//   3. Cache: in-process 1 h (zero latency), Redis 24 h (~50 ms).
-//      Cold start cost: ~3-8 s, paid ONCE per day.
-//      Warm query cost: ~0 ms — pure local string matching, no HTTP at all.
-//   4. Match queries using the existing scoreCandidate() function.
-// ─────────────────────────────────────────────────────────────────────────────
-
-const NBC_LISTING_URL      = 'https://www.notebookcheck.net/Smartphones.8.0.html';
-const NBC_INDEX_REDIS_KEY  = 'nbc:listing-index:v1';
-const NBC_INDEX_REDIS_TTL  = 24 * 60 * 60;          // 24 h (Redis EX seconds)
-const NBC_INDEX_MEM_TTL_MS =  1 * 60 * 60 * 1000;  // 1 h (in-process ms)
-
-// Dedicated in-process cache — separate from memCache so it is never evicted
-// by normal device-data LRU churn.
-let _nbcIndex: { entries: Array<{ url: string; title: string }>; builtAt: number } | null = null;
-
-/** Extract all review links from one page of listing HTML. */
-function extractListingPageLinks(html: string): Array<{ url: string; title: string }> {
-  const $ = cheerio.load(html);
-  const out: Array<{ url: string; title: string }> = [];
-  const seen = new Set<string>();
-
-  $('a[href]').each((_, el) => {
-    const href    = $(el).attr('href') || '';
-    const fullUrl = href.startsWith('http') ? href
-      : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
-
-    if (!fullUrl.includes('notebookcheck.net')) return;
-    if (!/\.\d{4,}\.0\.html/.test(fullUrl)) return;
-    if (seen.has(fullUrl)) return;
-    if (/[?&](tag|q|word|id)=/.test(fullUrl)) return;
-    if (/\/(Smartphones|Topics|Search|RSS|index|News)\.\d/i.test(fullUrl)) return;
-    // Must look like a device review — long numeric article ID
-    if (!/[A-Za-z]{3}.*\.\d{5,}\.0\.html/.test(fullUrl)) return;
-
-    const title = norm($(el).text() || $(el).attr('title') || '');
-    if (!title || title.length < 4 || title.length > 200) return;
-
-    seen.add(fullUrl);
-    out.push({ url: fullUrl, title });
-  });
-
-  return out;
-}
-
-/** Detect all paginated URLs from a listing page. */
-function detectListingPageUrls(html: string): string[] {
-  const $ = cheerio.load(html);
-  const urls = new Set<string>();
-
-  $('a[href]').each((_, el) => {
-    const href = $(el).attr('href') || '';
-    if (!href || href === NBC_LISTING_URL || href === '/Smartphones.8.0.html') return;
-
-    const isListingPage =
-      (href.includes('Smartphones.8') && href !== NBC_LISTING_URL) ||
-      (href.includes('Smartphones') && /[?&@]/.test(href)) ||
-      (/\/@\d/.test(href) && href.toLowerCase().includes('smartphone'));
-
-    if (!isListingPage) return;
-    const full = href.startsWith('http') ? href
-      : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
-    if (full) urls.add(full);
-  });
-
-  return [...urls];
-}
-
-/**
- * Build (or return cached) the full NBC smartphone review index.
- *
- * Latency:
- *   In-process warm  (<1 h old)  : ~0 ms
- *   Redis warm        (<24 h old) : ~50-100 ms
- *   Cold fetch        (first/day) : ~3-8 s  ← only paid once per day
- */
-async function getNBCListingIndex(signal?: AbortSignal): Promise<Array<{ url: string; title: string }>> {
-  // 1. In-process (fastest)
-  if (_nbcIndex && (Date.now() - _nbcIndex.builtAt) < NBC_INDEX_MEM_TTL_MS) {
-    return _nbcIndex.entries;
-  }
-
-  // 2. Redis
-  const cached = await getCacheAs<Array<{ url: string; title: string }>>(NBC_INDEX_REDIS_KEY);
-  if (cached && cached.length > 0) {
-    _nbcIndex = { entries: cached, builtAt: Date.now() };
-    log('info', 'nbc.index.redis_hit', { count: cached.length });
-    return cached;
-  }
-
-  // 3. Cold scrape
-  log('info', 'nbc.index.cold_start', {});
-  const t0 = Date.now();
-
-  try {
-    const page1Html  = await fetchUrl(NBC_LISTING_URL, 12000, { 'Referer': 'https://www.notebookcheck.net/' }, 1, signal);
-    const page1Links = extractListingPageLinks(page1Html);
-    const pageUrls   = detectListingPageUrls(page1Html).slice(0, 60);
-
-    log('info', 'nbc.index.pagination', { pages: pageUrls.length, page1: page1Links.length });
-
-    const settled = await Promise.allSettled(
-      pageUrls.map(url =>
-        fetchUrl(url, 12000, { 'Referer': 'https://www.notebookcheck.net/' }, 1, signal)
-          .then(html => extractListingPageLinks(html))
-          .catch((): Array<{ url: string; title: string }> => [])
-      )
-    );
-
-    const all = new Map<string, { url: string; title: string }>();
-    for (const e of page1Links) all.set(e.url, e);
-    for (const r of settled) {
-      if (r.status === 'fulfilled') for (const e of r.value) all.set(e.url, e);
-    }
-
-    const entries = [...all.values()];
-    log('info', 'nbc.index.built', { count: entries.length, ms: Date.now() - t0 });
-
-    // Persist — in-process immediately, Redis fire-and-forget
-    _nbcIndex = { entries, builtAt: Date.now() };
-    const redisUrl   = process.env.UPSTASH_REDIS_REST_URL;
-    const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (redisUrl && redisToken) {
-      sharedAxios.post(
-        `${redisUrl}/pipeline`,
-        [['SET', NBC_INDEX_REDIS_KEY, JSON.stringify(entries), 'EX', NBC_INDEX_REDIS_TTL]],
-        { headers: { Authorization: `Bearer ${redisToken}`, 'Content-Type': 'application/json' }, timeout: 3000 },
-      ).catch((e: Error) => log('warn', 'nbc.index.redis_fail', { err: e.message }));
-    }
-
-    return entries;
-  } catch (e: any) {
-    log('warn', 'nbc.index.cold_fail', { err: e?.message });
-    return [];
-  }
-}
-
-/**
- * Search the cached NBC listing index for the best matching reviews.
- * After the first warm-up this costs ~0 ms — pure in-process array scan.
- */
-async function searchViaListingIndex(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
-  const index = await getNBCListingIndex(signal);
-  if (!index.length) return [];
-
-  const results: SearchResult[] = [];
-  for (const { url, title } of index) {
-    const sc = scoreCandidate(title, url, nq, oq);
-    if (sc >= 0) results.push({ url, title, score: sc });
-  }
-
-  log('info', 'nbc.index.search', { nq, indexSize: index.length, matches: results.length });
-  return results;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SEARCH: SearXNG — fallback only (listing index is the primary path)
-// NOTE: SearXNG backends (Google, Bing, DDG) block cloud IPs after a few
-// requests. Use only when the listing index returns zero results.
+// SEARCH: SearXNG
+// Circuit breaker prevents hammering the instance when it is consistently down.
 // ─────────────────────────────────────────────────────────────────────────────
 export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const seen = new Set<string>();
@@ -919,24 +745,18 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     'https://searxng-notebookcheck.onrender.com',
   ];
 
-  // Use nq (normalized) as primary query; fall back to oq only if nq returns 0 results.
-  // Sequential — not parallel — to avoid CPU contention on Render free tier.
-  // FIX: was firing both oq+nq in parallel with Promise.all → doubled load.
-  const primaryQuery = nq !== oq ? nq : oq;
-  const fallbackQuery = nq !== oq ? oq : null;
-
-  debugLog.push({ step: 'queries', primaryQuery, fallbackQuery });
+  // Fire two queries in parallel when nq differs from oq
+  const queries = [oq, ...(nq !== oq ? [nq] : [])];
+  
+  debugLog.push({ step: 'queries', queries, queryCount: queries.length });
 
   const doSearch = async (base: string, q: string) => {
     const searchUrl = `${base}/search`;
-    // FIX: removed `engines` param — was hardcoded to 'google,bing,duckduckgo',
-    // overriding settings.yml. Bing+DDG block Render IPs → 4.5s timeouts → null results.
-    // Force Google only — Bing/DDG block cloud IPs, causing full request_timeout delays.
     const params = { 
       q: `site:notebookcheck.net ${q} review`, 
       format: 'json', 
-      categories: 'general',
-      engines: 'google',    
+      engines: 'google,bing,duckduckgo', 
+      categories: 'general' 
     };
     
     debugLog.push({ step: 'request', base, query: q, fullQuery: params.q });
@@ -944,7 +764,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     const resp = await sharedAxios.get(searchUrl, {
       params,
       headers: { 'User-Agent': randomUA(), 'Accept': 'application/json' },
-      timeout: 8000, // FIX: was 15000ms — 8s is enough for Google via SearXNG
+      timeout: 15000, // Increased to 15s for cold starts
       signal,
     });
     
@@ -975,23 +795,14 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     debugLog.push({ step: 'trying_instance', base });
 
     try {
-      // FIX: sequential queries instead of Promise.all — avoids CPU contention on Render free tier.
-      // Primary query first; only fire fallback if primary returns 0 raw results.
-      let primaryItems = await doSearch(base, primaryQuery);
-      debugLog.push({ step: 'primary_results', base, query: primaryQuery, count: primaryItems.length });
-
-      if (primaryItems.length === 0 && fallbackQuery) {
-        debugLog.push({ step: 'fallback_attempt', base, query: fallbackQuery });
-        primaryItems = await doSearch(base, fallbackQuery);
-        debugLog.push({ step: 'fallback_results', base, query: fallbackQuery, count: primaryItems.length });
-      }
-
-      const totalResults = primaryItems.length;
+      const responses = await Promise.all(queries.map(q => doSearch(base, q)));
+      const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
       
       debugLog.push({ 
-        step: 'sequential_results',
+        step: 'parallel_results',
         base, 
         totalRawResults: totalResults,
+        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
       });
       
       if (totalResults > 0) {
@@ -1001,7 +812,6 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         let droppedCount = 0;
         let dropReasons: Record<string, number> = {};
         
-        const responses = [primaryItems];
         for (const items of responses) {
           for (const item of items) {
             const url   = (item.url || '').trim();
@@ -1064,7 +874,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         
         return all;
       } else {
-        debugLog.push({ step: 'zero_raw_results', base, primaryQuery, fallbackQuery });
+        debugLog.push({ step: 'zero_raw_results', base, queries });
       }
     } catch (e) {
       debugLog.push({ 
@@ -1148,24 +958,16 @@ export function resolveSearchResult(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEARCH — listing index primary, SearXNG fallback
+// SEARCH — SearXNG only
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchNBC(query: string): Promise<{ name: string; url: string } | null> {
   const ck = `nbc:search:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-
-  const cached = await getCacheAs<{ name: string; url: string }>(ck);
+  const [cached, results] = await Promise.all([
+    getCacheAs<{ name: string; url: string }>(ck),
+    searchViaSearXNG(nq, oq),
+  ]);
   if (cached) return cached;
-
-  // Primary: NBC listing index — truly unlimited, local matching, no HTTP per query
-  let results = await searchViaListingIndex(nq, oq);
-
-  // Fallback: SearXNG (may be rate-limited on cloud IPs)
-  if (!results.length) {
-    log('info', 'search.fallback_to_searxng', { query: nq });
-    results = await searchViaSearXNG(nq, oq);
-  }
-
   if (!results.length) return null;
   return resolveSearchResult(results, nq, oq, ck);
 }
@@ -3183,12 +2985,12 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
   const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const t0 = Date.now();
 
-  // PERF: fire full-result cache check and listing-index search in parallel.
+  // PERF: fire full-result cache check and SearXNG search in parallel.
   // On a cache miss the search has already been running while Redis was checked.
   const oq = query.trim(), nq = normalizeQuery(query);
   const [cached, searchResults] = await Promise.all([
     getCacheAs<NBCDeviceData | NBCError>(ck),
-    searchViaListingIndex(nq, oq),
+    searchViaSearXNG(nq, oq),
   ]);
   if (cached) { log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 }); return cached; }
 
@@ -3218,7 +3020,7 @@ export async function searchNotebookCheck(query: string): Promise<SearchResult[]
   const oq = query.trim(), nq = normalizeQuery(query);
   const [cached, results] = await Promise.all([
     getCacheAs<SearchResult[]>(ck),
-    searchViaListingIndex(nq, oq),
+    searchViaSearXNG(nq, oq),
   ]);
   if (cached) return cached;
   if (!results.length) return [];
