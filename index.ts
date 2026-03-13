@@ -844,4 +844,46 @@ app.get('/api/index/crawl-debug', async (req, res) => {
   }
 });
 
+// /api/debug/redis — check Redis connectivity and env vars
+app.get('/api/debug/redis', async (req, res) => {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+  if (!url || !token) {
+    return res.status(500).json({
+      success: false,
+      error: 'Missing env vars',
+      UPSTASH_REDIS_REST_URL:   url   ? '✅ set' : '❌ MISSING',
+      UPSTASH_REDIS_REST_TOKEN: token ? '✅ set' : '❌ MISSING',
+    });
+  }
+
+  try {
+    const axios2 = (await import('axios')).default;
+    // Write a test key
+    await axios2.post(`${url}/pipeline`,
+      [['SET', 'debug:ping', 'pong', 'EX', 30]],
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
+    // Read it back
+    const r = await axios2.get(`${url}/get/debug:ping`,
+      { headers: { Authorization: `Bearer ${token}` } });
+    const val = r.data?.result;
+    return res.json({
+      success: val === 'pong',
+      redis: val === 'pong' ? '✅ connected' : '❌ read failed',
+      UPSTASH_REDIS_REST_URL:   '✅ set',
+      UPSTASH_REDIS_REST_TOKEN: '✅ set',
+      pingResult: val,
+    });
+  } catch (e: any) {
+    return res.status(500).json({
+      success: false,
+      error: e.message,
+      UPSTASH_REDIS_REST_URL:   '✅ set',
+      UPSTASH_REDIS_REST_TOKEN: '✅ set',
+      hint: 'URL or token value is wrong — check Upstash dashboard',
+    });
+  }
+});
+
 module.exports = app;

@@ -183,11 +183,13 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     const slug = href.split('/').pop() || '';
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News)\./i.test(slug)) return;
 
-    const hasPhone  = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
-    // Also accept URLs that are clearly phone brand + model patterns even without "phone" keyword
-    const looksLikePhoneModel = /^(apple|samsung|google|oneplus|xiaomi|oppo|vivo|realme|motorola|sony|asus|honor|huawei|nothing|nokia|poco|redmi|iqoo|tcl|infinix|tecno|lava|blackberry|meizu|nubia|fairphone|sharp|ulefone|doogee|blackview|oukitel|umidigi|blu|wiko|lenovo|alcatel|energizer|zte|cat|gigaset|unihertz|crosscall|agm|panasonic)/i.test(slug);
-    const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|camera(?!-sample)|drone|keyboard|mouse|printer|router|modem|tv|television|projector|refrigerator|washer/i.test(slug);
-    if ((!hasPhone && !looksLikePhoneModel) || notAPhone) return;
+    // Exclude laptops, CPU/GPU analyses and non-phone hardware immediately
+    const notAPhone = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|charger|powerbank|earbuds|speaker|monitor|drone|keyboard|mouse|printer|router|modem|television|projector|cpu[-_]analysis|gpu[-_]analysis|thinkpad|ideapad|vivobook|zenbook|matebook|xps-|inspiron|pavilion|envy|spectre|elitebook|probook|razer-blade|apple-m[0-9][-_]/i.test(slug);
+    if (notAPhone) return;
+
+    const hasPhone = /smartphone|iphone|(?<![a-z])phone(?![a-z])|mobile|handset/i.test(slug);
+    const looksLikePhoneModel = /^(samsung[-_]galaxy|google[-_]pixel|oneplus|xiaomi|oppo|vivo|realme|motorola[-_]moto|sony[-_]xperia|honor|huawei|nothing[-_]phone|nokia|poco|redmi|iqoo|tcl|infinix|tecno|lava|blackberry|meizu|nubia|fairphone|ulefone|doogee|blackview|oukitel|umidigi|blu|alcatel|zte|unihertz|crosscall|agm)/i.test(slug);
+    if (!hasPhone && !looksLikePhoneModel) return;
 
     if (seen.has(href.toLowerCase())) return;
     seen.add(href.toLowerCase());
