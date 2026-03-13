@@ -864,6 +864,120 @@ app.get('/api/index/reset-url', async (req, res) => {
   }
 });
 
+// /migrate — self-running HTML dashboard that loops migrate-review-urls until done
+app.get('/migrate', (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>NBC Migration — Upgrade to Review URLs</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
+    h1 { font-size: 18px; color: #58a6ff; margin-bottom: 20px; }
+    #status { font-size: 13px; color: #8b949e; margin-bottom: 16px; }
+    #bar-wrap { background: #161b22; border-radius: 6px; overflow: hidden; height: 22px; margin-bottom: 20px; }
+    #bar { height: 100%; background: #238636; width: 0%; transition: width 0.4s ease; }
+    #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+    .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; text-align: center; }
+    .stat .val { font-size: 28px; font-weight: bold; color: #58a6ff; }
+    .stat .lbl { font-size: 11px; color: #8b949e; margin-top: 4px; }
+    #upgraded .val { color: #3fb950; }
+    #noReview .val  { color: #d29922; }
+    #errors .val    { color: #f85149; }
+    #log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;
+           height: 260px; overflow-y: auto; font-size: 11px; line-height: 1.6; }
+    .log-line { color: #8b949e; }
+    .log-line.ok  { color: #3fb950; }
+    .log-line.done { color: #58a6ff; font-weight: bold; }
+    .log-line.err  { color: #f85149; }
+    #btn { margin-top: 16px; padding: 8px 20px; background: #238636; color: #fff;
+           border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    #btn:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
+    #done-banner { display: none; margin-top: 16px; padding: 14px; background: #0d4a23;
+                   border: 1px solid #238636; border-radius: 6px; color: #3fb950; font-size: 14px; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>🔄 NBC Migration — Upgrade Library URLs → Internal Review URLs</h1>
+  <div id="status">Press Start to begin. Each batch processes 200 entries.</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
+  <div id="stats">
+    <div class="stat"><div class="val" id="v-processed">—</div><div class="lbl">Processed</div></div>
+    <div class="stat" id="upgraded"><div class="val" id="v-upgraded">—</div><div class="lbl">Upgraded ✅</div></div>
+    <div class="stat" id="noReview"><div class="val" id="v-noReview">—</div><div class="lbl">No Review Yet</div></div>
+    <div class="stat" id="errors"><div class="val" id="v-errors">—</div><div class="lbl">Errors</div></div>
+  </div>
+  <div id="log"></div>
+  <button id="btn" onclick="start()">▶ Start Migration</button>
+  <div id="done-banner">✅ Migration complete! Search index rebuilt. All review URLs are now stored.</div>
+
+<script>
+  let running = false;
+  const BATCH = 200;
+  const DELAY = 1500; // ms between calls
+
+  function log(msg, cls = '') {
+    const el = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = 'log-line ' + cls;
+    line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function update(r) {
+    document.getElementById('v-processed').textContent = r.processed + ' / ' + r.total;
+    document.getElementById('v-upgraded').textContent  = r.upgraded;
+    document.getElementById('v-noReview').textContent  = r.noReview;
+    document.getElementById('v-errors').textContent    = r.errors;
+    const pct = r.total > 0 ? (r.processed / r.total * 100).toFixed(1) : 0;
+    document.getElementById('bar').style.width = pct + '%';
+    document.getElementById('status').textContent =
+      'Batch done — ' + pct + '% complete (' + r.remaining + ' remaining)';
+  }
+
+  async function runBatch() {
+    const resp = await fetch('/api/index/migrate-review-urls?batch=' + BATCH);
+    const r = await resp.json();
+    if (!r.success) throw new Error(r.error || 'API error');
+    update(r);
+    log('Batch: +' + r.upgraded + ' upgraded, +' + r.noReview + ' no-review, ' + r.remaining + ' left (' + r.durationMs + 'ms)', 'ok');
+    return r.done;
+  }
+
+  async function start() {
+    if (running) return;
+    running = true;
+    document.getElementById('btn').disabled = true;
+    document.getElementById('btn').textContent = '⏳ Running…';
+    log('Migration started…');
+
+    try {
+      while (true) {
+        const done = await runBatch();
+        if (done) {
+          log('🎉 All done! Search index rebuilt.', 'done');
+          document.getElementById('status').textContent = '✅ Migration complete!';
+          document.getElementById('done-banner').style.display = 'block';
+          document.getElementById('btn').textContent = '✅ Done';
+          break;
+        }
+        await new Promise(r => setTimeout(r, DELAY));
+      }
+    } catch (e) {
+      log('Error: ' + e.message, 'err');
+      document.getElementById('btn').disabled = false;
+      document.getElementById('btn').textContent = '▶ Resume';
+      running = false;
+    }
+  }
+</script>
+</body>
+</html>`);
+});
+
 // /api/index/brands — brand coverage
 app.get('/api/index/brands', async (req, res) => {
   try {
