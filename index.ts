@@ -37,7 +37,7 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v5-SEARCHFIX' }));
+app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v6-SEQUENTIAL-INDEX' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
@@ -49,8 +49,8 @@ app.get('/api/phone', async (req, res) => {
   if (!q) return res.status(400).json({ success: false, error: '"q" required' });
 
   try {
+    // ── Step 1: local index search (fast, no external call) ──────────────────────────────
     const { scrapeIndexedDevice, searchIndex, clearScrapeCache } = await import('./src/notebookcheck_index');
-
     const best = await searchIndex(q);
 
     if (best) {
@@ -59,13 +59,15 @@ app.get('/api/phone', async (req, res) => {
       if (result.success) {
         return res.json({ success: true, source: result.cached ? 'cache' : 'index', cached: result.cached, matchedUrl: best.url, matchedTitle: best.title, data: result.data });
       }
+      // Index matched but scrape failed — fall through to SearXNG
     }
 
-    // Fallback: SearXNG live search
+    // ── Step 2: SearXNG fallback — ONLY reached when index misses or scrape fails ──────────────
+    // Not run in parallel — only fires when index has no match for this query.
     const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
     const data = await getNotebookCheckDataFast(q);
     if (!data) return res.status(404).json({ success: false, error: 'Device not found' });
-    return res.json({ success: true, source: 'live', data });
+    return res.json({ success: true, source: 'searxng', data });
 
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });

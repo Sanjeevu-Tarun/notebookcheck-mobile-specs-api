@@ -31,7 +31,7 @@ const LOCK_TTL      = 300;
 // Smartphone-specific listing pages on NotebookCheck
 // Reviews.55.0.html = all reviews (mostly laptops), Smartphones.155.0.html = phones only
 const NBC_REVIEWS_BASE  = 'https://www.notebookcheck.net/Reviews.55.0.html';
-const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Reviews.55.0.html';
+const NBC_PHONES_BASE   = 'https://www.notebookcheck.net/Smartphones.155.0.html';
 
 // ── TYPES ─────────────────────────────────────────────────────────────────────
 
@@ -419,6 +419,18 @@ function cleanIndexTitle(raw: string): string {
   return t.toLowerCase().trim();
 }
 
+// Pre-compiled word boundary regex cache: avoids re-compiling the same regex
+// for every entry (1800+ iterations) on every request.
+const _wordBoundaryCache = new Map<string, RegExp>();
+function wordBoundaryRe(word: string): RegExp {
+  let re = _wordBoundaryCache.get(word);
+  if (!re) {
+    re = new RegExp(`(?<![a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`);
+    _wordBoundaryCache.set(word, re);
+  }
+  return re;
+}
+
 // Same scoring as GSMArena resolver — all words must match, variant penalty system
 function scoreIndexMatch(entryTitle: string, query: string): number {
   // Score only against the clean title, NOT the snippet (which may contain false word matches)
@@ -428,8 +440,7 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
 
   // ALL query words must appear as whole words in the clean title — hard reject otherwise
   // Use word boundary check: " word " or start/end — prevents "ultra" matching "ultra-slim"
-  const wordIn = (word: string, text: string) =>
-    new RegExp(`(?<![a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`).test(text);
+  const wordIn = (word: string, text: string) => wordBoundaryRe(word).test(text);
 
   if (!qWords.every((w: string) => wordIn(w, d))) return -1;
 
@@ -438,7 +449,7 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   if (d.includes(q)) return 8000;
 
   // Penalise entries that have variant words the query didn't ask for
-  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip'];
+  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g'];
   const lastQWord = qWords[qWords.length - 1];
   let penalty = 0;
   for (const v of variants) {
@@ -498,22 +509,8 @@ export async function scrapeIndexedDevice(url: string): Promise<{ success: boole
     // If scrape took <200ms it almost certainly came from Redis cache
     const cached = ms < 200;
 
-    // Update entry status in background — fire and forget
-    loadEntries().then(entries => {
-      if (entries[url]) {
-        entries[url] = { ...entries[url], status: 'done', scrapedAt: new Date().toISOString() };
-        saveEntries(entries).catch(() => {});
-      }
-    }).catch(() => {});
-
     return { success: true, data, cached };
   } catch (e: any) {
-    loadEntries().then(entries => {
-      if (entries[url]) {
-        entries[url] = { ...entries[url], status: 'error', errorMsg: e?.message ?? String(e), retries: (entries[url].retries ?? 0) + 1 };
-        saveEntries(entries).catch(() => {});
-      }
-    }).catch(() => {});
     return { success: false, error: e?.message ?? String(e) };
   }
 }
