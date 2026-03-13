@@ -1018,58 +1018,59 @@ app.get('/recover', (req, res) => {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>NBC Recovery — Restore Review URLs</title>
+  <title>NBC Recovery — Full Re-crawl</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: monospace; background: #0d1117; color: #e6edf3; padding: 24px; }
-    h1 { font-size: 18px; color: #58a6ff; margin-bottom: 6px; }
+    h1 { font-size: 18px; color: #f85149; margin-bottom: 6px; }
     .subtitle { font-size: 12px; color: #8b949e; margin-bottom: 20px; }
     #status { font-size: 13px; color: #8b949e; margin-bottom: 16px; }
+    #bar-wrap { background: #161b22; border-radius: 6px; overflow: hidden; height: 22px; margin-bottom: 20px; }
+    #bar { height: 100%; background: #1f6feb; width: 0%; transition: width 0.4s ease; }
     #stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
     .stat { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 14px; text-align: center; }
     .stat .val { font-size: 28px; font-weight: bold; color: #58a6ff; }
     .stat .lbl { font-size: 11px; color: #8b949e; margin-top: 4px; }
-    #recovered .val  { color: #3fb950; }
-    #present .val    { color: #d29922; }
-    #purged .val     { color: #f85149; }
-    #cachekeys .val  { color: #58a6ff; }
+    #v-recovered .val { color: #3fb950; }
     #log { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px;
-           height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
-    .log-line       { color: #8b949e; }
-    .log-line.ok    { color: #3fb950; }
-    .log-line.done  { color: #58a6ff; font-weight: bold; font-size: 12px; }
-    .log-line.warn  { color: #d29922; }
-    .log-line.err   { color: #f85149; }
-    #btn { margin-top: 16px; padding: 9px 22px; background: #1f6feb; color: #fff;
+           height: 300px; overflow-y: auto; font-size: 11px; line-height: 1.7; }
+    .log-line      { color: #8b949e; }
+    .log-line.ok   { color: #3fb950; }
+    .log-line.done { color: #58a6ff; font-weight: bold; }
+    .log-line.warn { color: #d29922; }
+    .log-line.err  { color: #f85149; }
+    #btn { margin-top: 16px; padding: 9px 22px; background: #f85149; color: #fff;
            border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-family: monospace; }
     #btn:disabled { background: #30363d; color: #8b949e; cursor: not-allowed; }
     #done-banner { display: none; margin-top: 16px; padding: 14px; background: #0d2942;
-                   border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff;
-                   font-size: 14px; text-align: center; }
-    .phase { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px;
-             font-weight: bold; margin-right: 6px; }
-    .phase-recover { background: #1f3a1f; color: #3fb950; }
-    .phase-purge   { background: #3a1f1f; color: #f85149; }
-    .phase-done    { background: #1a2a3a; color: #58a6ff; }
+                   border: 1px solid #1f6feb; border-radius: 6px; color: #58a6ff; font-size: 14px; text-align: center; }
+    .phase { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; margin-right: 6px; }
+    .phase-crawl  { background: #1a2a3a; color: #58a6ff; }
+    .phase-purge  { background: #3a1f1f; color: #f85149; }
+    .phase-done   { background: #1f3a1f; color: #3fb950; }
   </style>
 </head>
 <body>
-  <h1>🔧 NBC Recovery — Restore Deleted Review URLs</h1>
-  <p class="subtitle">Scans Redis resolve cache → recovers deleted review entries → purges library duplicates</p>
-  <div id="status">Press Start to begin.</div>
+  <h1>🚨 NBC Recovery — Full Re-crawl + Purge</h1>
+  <p class="subtitle">Re-crawls all Chronological pages → resolves library URLs to review URLs (from cache, fast) → purges dupes</p>
+  <div id="status">Press Start. Resolve cache is still alive — crawl will be fast (no live NBC fetches).</div>
+  <div id="bar-wrap"><div id="bar"></div></div>
 
   <div id="stats">
-    <div class="stat" id="cachekeys"><div class="val" id="v-cachekeys">—</div><div class="lbl">Cache Keys Scanned</div></div>
-    <div class="stat" id="recovered"><div class="val" id="v-recovered">—</div><div class="lbl">Recovered ✅</div></div>
-    <div class="stat" id="present"><div class="val" id="v-present">—</div><div class="lbl">Already Present</div></div>
-    <div class="stat" id="purged"><div class="val" id="v-purged">—</div><div class="lbl">Dupes Purged 🗑</div></div>
+    <div class="stat"><div class="val" id="v-page">—</div><div class="lbl">Page</div></div>
+    <div class="stat"><div class="val" id="v-total">—</div><div class="lbl">Total in Index</div></div>
+    <div class="stat"><div class="val" id="v-new">—</div><div class="lbl">Re-added ✅</div></div>
+    <div class="stat"><div class="val" id="v-purged">—</div><div class="lbl">Dupes Purged 🗑</div></div>
   </div>
 
   <div id="log"></div>
-  <button id="btn" onclick="start()">▶ Start Recovery</button>
-  <div id="done-banner">✅ Recovery complete! Index is clean — only internal review URLs remain.</div>
+  <button id="btn" onclick="start()">▶ Start Recovery Re-crawl</button>
+  <div id="done-banner">✅ Recovery complete! All internal review URLs restored. Index is clean.</div>
 
 <script>
+  let running = false;
+  let totalNew = 0;
+
   function log(msg, cls = '') {
     const el = document.getElementById('log');
     const d = document.createElement('div');
@@ -1079,58 +1080,76 @@ app.get('/recover', (req, res) => {
     el.scrollTop = el.scrollHeight;
   }
 
-  function setStatus(msg) {
-    document.getElementById('status').textContent = msg;
+  function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+  async function crawlPage(page) {
+    const r = await fetch('/api/index/crawl-page?page=' + page).then(r => r.json());
+    if (!r.success) throw new Error(r.result?.error || 'crawl-page failed');
+    return r.result;
   }
 
   async function start() {
+    if (running) return;
+    running = true;
     document.getElementById('btn').disabled = true;
-    document.getElementById('btn').textContent = '⏳ Running…';
+    document.getElementById('btn').textContent = '⏳ Re-crawling…';
+    log('<span class="phase phase-crawl">CRAWL</span> Starting re-crawl from page 1…');
 
     try {
-      // ── STEP 1: Recover deleted review URLs ──────────────────────────────
-      setStatus('Step 1/2 — Scanning Redis cache and recovering deleted review URLs…');
-      log('<span class="phase phase-recover">RECOVER</span> Scanning nbc:review_resolve:* cache keys…');
+      let page = 1;
+      let maxPages = 300; // safety ceiling
 
-      const rr = await fetch('/api/index/recover-review-urls').then(r => r.json());
+      while (page <= maxPages) {
+        setStatus('Step 1/2 — Crawling page ' + page + '…');
+        const r = await crawlPage(page);
 
-      if (!rr.success) throw new Error(rr.error);
+        totalNew += (r.newUrls || 0);
+        document.getElementById('v-page').textContent    = r.page;
+        document.getElementById('v-total').textContent   = r.totalUrls;
+        document.getElementById('v-new').textContent     = totalNew;
 
-      document.getElementById('v-cachekeys').textContent = rr.totalCacheKeys ?? '—';
-      document.getElementById('v-recovered').textContent = rr.recovered;
-      document.getElementById('v-present').textContent   = rr.alreadyPresent;
+        // Rough progress — NBC Chronological has ~150 pages
+        const pct = Math.min((page / 150) * 100, 99).toFixed(0);
+        document.getElementById('bar').style.width = pct + '%';
 
-      if (rr.recovered > 0) {
-        log('<span class="phase phase-recover">RECOVER</span> ✅ Recovered ' + rr.recovered + ' deleted review entries (' + rr.alreadyPresent + ' were already present, ' + rr.totalCacheKeys + ' cache keys scanned)', 'ok');
-      } else {
-        log('<span class="phase phase-recover">RECOVER</span> Nothing to recover — all review URLs already present (' + rr.alreadyPresent + ' found, ' + rr.totalCacheKeys + ' cache keys scanned)', 'warn');
+        log('<span class="phase phase-crawl">CRAWL</span> Page ' + r.page +
+            ' — ' + r.phonesFound + ' phones found, ' + r.newUrls + ' re-added' +
+            ' (total: ' + r.totalUrls + ')', r.newUrls > 0 ? 'ok' : '');
+
+        if (r.done) {
+          log('<span class="phase phase-crawl">CRAWL</span> All pages done. ' + totalNew + ' entries re-added total.', 'ok');
+          break;
+        }
+
+        page = r.nextPage;
+        await new Promise(res => setTimeout(res, 800));
       }
 
-      // ── STEP 2: Purge library duplicates ─────────────────────────────────
-      setStatus('Step 2/2 — Purging library duplicates and junk titles…');
-      log('<span class="phase phase-purge">PURGE</span> Scanning for library duplicates and junk title entries…');
+      // ── Purge library dupes now that review URLs are back ─────────────────
+      setStatus('Step 2/2 — Purging library duplicates…');
+      log('<span class="phase phase-purge">PURGE</span> Removing library URLs that now have a review URL…');
+      document.getElementById('bar').style.width = '100%';
 
       const pr = await fetch('/api/index/purge-library-duplicates').then(r => r.json());
-
       if (!pr.success) throw new Error(pr.error);
 
       document.getElementById('v-purged').textContent = pr.purged;
+      log('<span class="phase phase-purge">PURGE</span> Purged ' + pr.purged +
+          ' dupes (' + pr.reasons.libraryDuplicate + ' library, ' + pr.reasons.junkTitle + ' junk). ' +
+          pr.kept + ' clean entries remain.', 'ok');
 
-      log('<span class="phase phase-purge">PURGE</span> 🗑 Purged ' + pr.purged + ' entries — ' +
-          pr.reasons.libraryDuplicate + ' library dupes, ' +
-          pr.reasons.junkTitle + ' junk titles. ' + pr.kept + ' clean entries remain.', 'ok');
-
-      // ── DONE ─────────────────────────────────────────────────────────────
+      // ── Done ──────────────────────────────────────────────────────────────
       setStatus('✅ Done — ' + pr.kept + ' clean entries in index');
-      log('<span class="phase phase-done">DONE</span> Index rebuilt. Only internal review URLs (and library-only phones) remain.', 'done');
+      log('<span class="phase phase-done">DONE</span> Recovery complete. Only review URLs + unreviewed library phones remain.', 'done');
       document.getElementById('done-banner').style.display = 'block';
       document.getElementById('btn').textContent = '✅ Done';
 
-    } catch (e) {
+    } catch(e) {
       log('❌ Error: ' + e.message, 'err');
-      setStatus('Error — check log');
+      setStatus('Error — check log above');
       document.getElementById('btn').disabled = false;
       document.getElementById('btn').textContent = '▶ Retry';
+      running = false;
     }
   }
 </script>
