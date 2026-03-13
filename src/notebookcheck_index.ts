@@ -238,6 +238,11 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const html = await fetchHtml(url);
   const found = extractPhoneUrls(html);
 
+  // Detect a truly empty/last page by counting ALL review links on the page,
+  // not just filtered phone URLs — a page full of laptops should NOT stop the crawl
+  const rawLinkCount = (html.match(/\.notebookcheck\.net\/[^"']+\.\d+\.0\.html/g) || []).length;
+  const pageIsEmpty = rawLinkCount === 0;
+
   const entries = await loadEntries();
   let newUrls = 0;
   for (const { url: u, title } of found) {
@@ -253,8 +258,7 @@ export async function crawlOnePage(page: number): Promise<CrawlPageResult> {
   const progress: CrawlProgress = { page, totalUrls, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await rSet(PROGRESS_KEY, progress, LOCK_TTL);
 
-  const done = found.length === 0;
-  return { page, phonesFound: found.length, totalUrls, newUrls, done, nextPage: done ? null : page + 1, durationMs: Date.now() - t0 };
+  return { page, phonesFound: found.length, totalUrls, newUrls, done: pageIsEmpty, nextPage: pageIsEmpty ? null : page + 1, durationMs: Date.now() - t0 };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
