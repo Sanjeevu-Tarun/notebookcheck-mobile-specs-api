@@ -862,15 +862,22 @@ app.get('/api/index/crawl-debug', async (req, res) => {
         allLinks.push(href);
         const slug = href.split('/').pop() || '';
         if (/review|smartphone|phone/i.test(slug)) reviewLinks.push(href);
-        if (/smartphone|phone/i.test(slug)) phoneLinks.push(href);
+        // Require smartphone/iPhone/phone but exclude headphone/earphone/etc
+        const hasPhone2 = /smartphone|(?<![a-z])phone(?![a-z])|iphone/i.test(slug);
+        const isNotPhone2 = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|case[-_]review|charger/i.test(slug);
+        if (hasPhone2 && !isNotPhone2) phoneLinks.push(href);
       });
 
-      // Pagination links
+      // Pagination links — NBC uses ns_page=
       const pageLinks: string[] = [];
       $('a[href]').each((_: any, el: any) => {
         const href = $(el).attr('href') || '';
-        if (/page=\d+/.test(href)) pageLinks.push(href);
+        if (/ns_page=\d+|[?&]page=\d+/.test(href)) pageLinks.push(href);
       });
+      const maxNsPage = pageLinks.reduce((max: number, h: string) => {
+        const m = h.match(/ns_page=(\d+)/);
+        return m ? Math.max(max, parseInt(m[1])) : max;
+      }, 1);
 
       results.push({
         url: testUrl,
@@ -886,6 +893,7 @@ app.get('/api/index/crawl-debug', async (req, res) => {
         samplePhoneLinks: phoneLinks.slice(0, 5),
         sampleNonPhoneLinks: reviewLinks.filter(u => !phoneLinks.includes(u)).slice(0, 3),
         paginationLinks: [...new Set(pageLinks)].slice(0, 5),
+        maxPageDetected: maxNsPage,
         htmlSnippet: req.query.raw === 'true' ? html.slice(0, 3000) : undefined,
       });
 

@@ -230,12 +230,12 @@ function extractReviewUrls(html: string): Array<{ url: string; title: string }> 
     // Reject clearly non-review content
     if (/users?[-_]complain|rumou?r|leaked?|price[-_]drop|hands?[-_]on(?!.*review)|first[-_]look|unboxing|teardown|external[-_]review/i.test(slug)) return;
 
-    // NBC smartphone review URLs ALWAYS contain "smartphone" or "phone" in the slug
-    // e.g. "Samsung-Galaxy-S25-Ultra-smartphone-review.1234567.0.html"
-    //      "Google-Pixel-10-Pro-XL-Powerful-smartphone-with-weak-heart.1128379.0.html"
-    //      "Apple-iPhone-17-Pro-review.9876543.0.html"  ← "phone" covers iPhones
-    // Non-phones like laptops/headphones/vacuums never have "smartphone"/"phone" in slug
-    if (!/smartphone|phone/i.test(slug)) return;
+    // NBC smartphone review slugs always contain "smartphone" or "phone"
+    // BUT "headphone", "earphone", "microphone" also match "phone" — exclude those
+    // Also exclude known non-phone categories that sometimes sneak through
+    const hasPhone = /smartphone|(?<![a-z])phone(?![a-z])|iphone/i.test(slug);
+    const isNotPhone = /headphone|earphone|microphone|earbuds|speaker|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|chromebook|case[-_]review|charger|powerbank/i.test(slug);
+    if (!hasPhone || isNotPhone) return;
 
     const key = href.toLowerCase();
     if (seen.has(key)) return;
@@ -263,21 +263,31 @@ function detectTotalPages(html: string): number {
   // or links with text "12", "13" etc.
   let maxPage = 1;
 
+  // NBC pagination links look like: /Reviews.55.0.html?&ns_page=5
   $('a[href]').each((_, el) => {
     const href = $(el).attr('href') || '';
-    // NBC uses ns_page= for pagination
-    const pageMatch = href.match(/ns_page=(\d+)/) || href.match(/[?&]page=(\d+)/);
+    const pageMatch = href.match(/ns_page=(\d+)/);
     if (pageMatch) {
       const p = parseInt(pageMatch[1]);
       if (p > maxPage) maxPage = p;
     }
   });
 
-  // Also check pagination text elements
-  $('[class*="pager"], [class*="pagination"], .page-numbers, [class*="tx-indexedsearch"]').find('a, span').each((_, el) => {
-    const t = $(el).text().trim();
-    const n = parseInt(t);
-    if (!isNaN(n) && n > maxPage && n < 500) maxPage = n;
+  // NBC also renders page numbers as plain text in pagination widget
+  $('a, span').each((_, el) => {
+    const href = $(el as any).attr?.('href') || '';
+    const txt  = $(el).text().trim();
+    // Only count short numeric strings that look like page numbers
+    if (/^\d{1,3}$/.test(txt)) {
+      const n = parseInt(txt);
+      if (n > maxPage && n < 500) maxPage = n;
+    }
+    // Also catch high ns_page values from any remaining links
+    const m = href.match(/ns_page=(\d+)/);
+    if (m) {
+      const p = parseInt(m[1]);
+      if (p > maxPage) maxPage = p;
+    }
   });
 
   log('debug', 'index.pagination', { maxPage });
@@ -417,7 +427,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     for (let page = 2; page <= pagesToFetch; page++) {
       await new Promise(r => setTimeout(r, delayMs));
 
-      const pageUrl = `${NBC_REVIEWS_BASE_A}?cat=Smartphones&ns_page=${page}`;
+      const pageUrl = `${NBC_REVIEWS_BASE_A}?&ns_page=${page}`;
       log('info', 'index.fetch_page', { page, url: pageUrl });
 
       try {
