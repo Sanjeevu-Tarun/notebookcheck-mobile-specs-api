@@ -14,22 +14,22 @@ import {
   PROC_CACHE_VERSION,
 } from './src/notebookcheck_processor';
 import {
-  crawlNBCSmartphoneIndex,
+  crawlSync,
+  crawlOnePage,
   getQueueStats,
   getIndexEntries,
   scrapeIndexedDevice,
-  bulkScrapeAll,
-  abortBulkScrape,
-  isBulkScrapeActive,
   validateIndexUrl,
   getBrandBreakdown,
   resetErrors,
   resetEntry,
   clearIndex,
-  loadIndexFromRedis,
   getCrawlInProgress,
   getLastCrawlStats,
-  indexStore,
+  getCrawlProgress,
+  resetCrawlLock,
+  extractPhoneUrls,
+  type CrawlPageResult,
 } from './src/notebookcheck_index';
 
 const app = express();
@@ -339,13 +339,7 @@ async function pingSearXNG() {
 pingSearXNG();
 setInterval(pingSearXNG, PING_INTERVAL_MS);
 
-// Auto-load the NBC review index from Redis on startup (non-blocking)
-// This restores index state after a redeploy so you don't lose scrape progress
-setTimeout(() => {
-  loadIndexFromRedis().then(count => {
-    if (count > 0) console.log(`[index] Loaded ${count} entries from Redis on startup`);
-  }).catch(e => console.warn('[index] Redis load failed on startup:', e.message));
-}, 2000);
+// No startup index load needed — Vercel serverless reads Redis per-request
 
 // Warm processor search cache on boot — runs in background, staggered 600ms/chip.
 // This pre-populates Redis so the first real user request for popular chips
@@ -623,105 +617,94 @@ app.get('/api/processor/search', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// NBC REVIEW INDEX ENDPOINTS  — the "memory game" approach
+// NBC REVIEW INDEX ENDPOINTS — Vercel serverless compatible (all state in Redis)
 // ─────────────────────────────────────────────────────────────────────────────
-// Flow:
-//   1. GET /api/index/crawl          → crawl NBC listing page, build URL index
-//   2. GET /api/index/status         → check index + scrape progress
-//   3. GET /api/index/validate       → verify crawled URLs resolve correctly
-//   4. GET /api/index/bulk-start     → bulk-scrape all indexed URLs (no SearXNG!)
-//   5. GET /api/index/list           → browse index with filters
+// CRAWL FLOW FOR VERCEL:
+//   1. GET /api/index/crawl?maxPages=40           → crawl 40 pages (~60s)
+//   2. GET /api/index/crawl?startPage=41&maxPages=40  → next batch
+//   3. Repeat until nextPage: null
+//   OR use /api/index/crawl-page?page=N for one page at a time
 // ═════════════════════════════════════════════════════════════════════════════
 
-// /api/index/crawl — crawl NBC smartphone reviews listing and build URL index
-// ?maxPages=N   cap pages (default: all)   ?force=true  force re-crawl
-// ?delayMs=N    ms between pages (default: 800)   ?bg=true  background mode
+// /api/index/crawl — crawl N pages synchronously (state saved to Redis each page)
+// ?startPage=1   ?maxPages=40   ?delayMs=600
+// Returns nextPage: N if more pages remain, null if complete
 app.get('/api/index/crawl', async (req, res) => {
-  const maxPages = parseInt(req.query.maxPages as string || '999');
-  const force    = req.query.force === 'true';
-  const delayMs  = parseInt(req.query.delayMs as string || '800');
-  const bg       = req.query.bg === 'true';
+  const startPage = parseInt(req.query.startPage as string || '1');
+  const maxPages  = Math.min(parseInt(req.query.maxPages as string || '40'), 100);
+  const delayMs   = parseInt(req.query.delayMs as string || '600');
+  const force     = req.query.force === 'true';
 
-  if (bg) {
-    res.json({ status: 'started', message: 'Crawl running in background — check /api/index/status' });
-    crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs }).catch(e =>
-      console.error('[crawl bg error]', e.message)
-    );
-    return;
-  }
+  if (force && startPage === 1) await resetCrawlLock();
+
   try {
-    const crawlStats = await crawlNBCSmartphoneIndex({ maxPages, forceRecrawl: force, delayMs });
-    return res.json({ success: true, crawl: crawlStats, queue: getQueueStats() });
+    const stats = await crawlSync(startPage, maxPages, delayMs);
+    const queue = await getQueueStats();
+    return res.json({ success: true, crawl: stats, queue,
+      hint: stats.nextPage ? `More pages available — call ?startPage=${stats.nextPage}&maxPages=${maxPages}` : 'Crawl complete!' });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// /api/index/status — overall index and scrape progress at a glance
-app.get('/api/index/status', (req, res) => {
-  const stats = getLastCrawlStats();
-  return res.json({
-    success: true,
-    index: { totalUrls: indexStore.size, lastCrawledAt: stats?.lastCrawledAt ?? null, crawlInProgress: getCrawlInProgress() },
-    scrape: { ...getQueueStats(), bulkActive: isBulkScrapeActive() },
-    brands: Object.fromEntries(Object.entries(getBrandBreakdown()).slice(0, 20)),
-    lastCrawl: stats,
-  });
-});
-
-// /api/index/list — browse index with filtering + pagination
-// ?status=pending|done|error|scraping|all   ?brand=Google   ?search=Pixel 10
-// ?page=1   ?limit=50
-app.get('/api/index/list', (req, res) => {
-  const status = (req.query.status as string) || 'all';
-  const brand  = req.query.brand  as string | undefined;
-  const search = req.query.search as string | undefined;
-  const page   = parseInt(req.query.page  as string || '1');
-  const limit  = Math.min(parseInt(req.query.limit as string || '50'), 200);
-  return res.json({ success: true, ...getIndexEntries({ status: status as any, brand, search, page, limit }) });
-});
-
-// /api/index/validate — validate N random index URLs (confirm they hit real device pages)
-// ?count=10   ?status=pending
-app.get('/api/index/validate', async (req, res) => {
-  const count  = Math.min(parseInt(req.query.count  as string || '10'), 50);
-  const status = (req.query.status as string) || 'pending';
-  const { entries } = getIndexEntries({ status: status as any, limit: count * 3 });
-  const sample = entries.sort(() => Math.random() - 0.5).slice(0, count);
-  if (!sample.length) return res.json({ success: true, message: 'No entries match filter', results: [] });
-  const results = await Promise.all(sample.map(e => validateIndexUrl(e.url)));
-  const valid = results.filter(r => r.valid).length;
-  return res.json({
-    success: true,
-    summary: { checked: results.length, valid, invalid: results.length - valid, validPct: `${((valid/results.length)*100).toFixed(1)}%` },
-    results,
-  });
-});
-
-// /api/index/validate-url — validate one specific URL
-// ?url=https://www.notebookcheck.net/...
-app.get('/api/index/validate-url', async (req, res) => {
-  const url = req.query.url as string;
-  if (!url) return res.status(400).json({ success: false, error: 'url required' });
+// /api/index/crawl-page — crawl exactly one page (for client-chaining or cron)
+// ?page=1
+app.get('/api/index/crawl-page', async (req, res) => {
+  const page = parseInt(req.query.page as string || '1');
   try {
-    return res.json({ success: true, result: await validateIndexUrl(url) });
+    const result = await crawlOnePage(page);
+    return res.json({ success: true, result,
+      hint: result.done ? 'No more pages — crawl complete' : `Call ?page=${result.nextPage} for next page` });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// /api/index/scrape-one — scrape a single indexed URL directly (no SearXNG)
+// /api/index/status — current index state (reads Redis)
+app.get('/api/index/status', async (req, res) => {
+  try {
+    const [stats, queue, brands, inProgress, progress] = await Promise.all([
+      getLastCrawlStats(),
+      getQueueStats(),
+      getBrandBreakdown(),
+      getCrawlInProgress(),
+      getCrawlProgress(),
+    ]);
+    return res.json({
+      success: true,
+      index: { totalUrls: queue.total, lastCrawledAt: stats?.lastCrawledAt ?? null, crawlInProgress: inProgress },
+      scrape: { ...queue, bulkActive: false },
+      progress: progress ?? null,
+      brands: Object.fromEntries(Object.entries(brands).slice(0, 20)),
+      lastCrawl: stats,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/list — browse index with filters
+// ?status=pending|done|error|all   ?brand=Samsung   ?search=Pixel   ?page=1   ?limit=50
+app.get('/api/index/list', async (req, res) => {
+  try {
+    const result = await getIndexEntries({
+      status: (req.query.status as any) || 'all',
+      brand:  req.query.brand  as string | undefined,
+      search: req.query.search as string | undefined,
+      page:   parseInt(req.query.page  as string || '1'),
+      limit:  Math.min(parseInt(req.query.limit as string || '50'), 200),
+    });
+    return res.json({ success: true, ...result });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/scrape-one — scrape one device by URL (no SearXNG)
 // ?url=https://www.notebookcheck.net/...
 app.get('/api/index/scrape-one', async (req, res) => {
   const url = req.query.url as string;
-  if (!url) return res.status(400).json({ success: false, error: 'url required' });
-  if (!indexStore.has(url)) {
-    const slug = url.split('/').pop() || '';
-    indexStore.set(url, {
-      url, title: slug.replace(/\.\d+\.0\.html$/, '').replace(/-/g, ' ').trim(),
-      brand: 'Unknown', slug, discoveredAt: new Date().toISOString(), status: 'pending', retries: 0,
-    });
-  }
+  if (!url) return res.status(400).json({ success: false, error: '"url" required' });
   try {
     const result = await scrapeIndexedDevice(url);
     if (!result.success) return res.status(502).json({ success: false, error: result.error, url });
@@ -731,216 +714,132 @@ app.get('/api/index/scrape-one', async (req, res) => {
   }
 });
 
-// /api/index/bulk-start — start bulk scraping all pending URLs (async, no SearXNG)
-// ?concurrency=2   ?delayMs=1200   ?onlyPending=true
-app.get('/api/index/bulk-start', (req, res) => {
-  if (isBulkScrapeActive()) {
-    return res.status(409).json({ success: false, error: 'Already running — call /api/index/bulk-abort first', queue: getQueueStats() });
-  }
-  const concurrency = Math.min(parseInt(req.query.concurrency as string || '2'), 5);
-  const delayMs     = parseInt(req.query.delayMs as string || '1200');
-  const onlyPending = req.query.onlyPending === 'true';
-  const q = getQueueStats();
-  if (q.pending + q.error === 0) {
-    return res.json({ success: false, message: 'Nothing to scrape. Run /api/index/crawl first.', queue: q });
-  }
-  bulkScrapeAll({ concurrency, delayMs, onlyPending }).then(r => console.log('[bulk] done:', r)).catch(e => console.error('[bulk] error:', e.message));
-  return res.json({ success: true, message: `Bulk scrape started — ${q.pending + q.error} URLs queued`, queue: q, config: { concurrency, delayMs, onlyPending }, monitor: '/api/index/status' });
-});
-
-// /api/index/bulk-abort — abort the running bulk scrape
-app.get('/api/index/bulk-abort', (req, res) => {
-  if (!isBulkScrapeActive()) return res.json({ success: false, message: 'No bulk scrape running' });
-  abortBulkScrape();
-  return res.json({ success: true, message: 'Abort signal sent. Current requests will finish, then scrape stops.' });
-});
-
-// /api/index/brands — brand breakdown with scrape coverage
-app.get('/api/index/brands', (req, res) => {
-  return res.json({ success: true, brands: getBrandBreakdown() });
-});
-
-// /api/index/errors — list all failed entries with error messages
-// ?limit=50   ?brand=Samsung
-app.get('/api/index/errors', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit as string || '50'), 200);
-  const brand = req.query.brand as string | undefined;
-  const result = getIndexEntries({ status: 'error', brand, limit, page: 1 });
-  return res.json({
-    success: true, total: result.total,
-    entries: result.entries.map(e => ({ url: e.url, title: e.title, brand: e.brand, retries: e.retries, errorMsg: e.errorMsg })),
-  });
-});
-
-// /api/index/reset-errors — reset all error entries back to pending for retry
-app.get('/api/index/reset-errors', (req, res) => {
-  const count = resetErrors();
-  return res.json({ success: true, resetCount: count, queue: getQueueStats() });
-});
-
-// /api/index/reset-url — reset a single URL back to pending
-// ?url=https://...
-app.get('/api/index/reset-url', (req, res) => {
-  const url = req.query.url as string;
-  if (!url) return res.status(400).json({ success: false, error: 'url required' });
-  const ok = resetEntry(url);
-  return res.json({ success: ok, message: ok ? 'Entry reset to pending' : 'URL not found in index', url });
-});
-
-// /api/index/entry — get index metadata for a specific URL
-// ?url=https://...
-app.get('/api/index/entry', (req, res) => {
-  const url = req.query.url as string;
-  if (!url) return res.status(400).json({ success: false, error: 'url required' });
-  const entry = indexStore.get(url);
-  if (!entry) return res.status(404).json({ success: false, error: 'URL not in index', url });
-  return res.json({ success: true, entry });
-});
-
-// /api/index/reload — reload index from Redis (after redeploy)
-app.get('/api/index/reload', async (req, res) => {
+// /api/index/validate — spot-check N random URLs from the index
+// ?count=5   ?status=pending
+app.get('/api/index/validate', async (req, res) => {
+  const count  = Math.min(parseInt(req.query.count as string || '5'), 20);
+  const status = (req.query.status as string) || 'pending';
   try {
-    const count = await loadIndexFromRedis();
-    return res.json({ success: true, loaded: count, queue: getQueueStats(), lastCrawl: getLastCrawlStats() });
+    const { entries } = await getIndexEntries({ status: status as any, limit: count * 3 });
+    const sample = entries.sort(() => Math.random() - 0.5).slice(0, count);
+    if (!sample.length) return res.json({ success: true, message: 'No entries match filter', results: [] });
+    const results = await Promise.all(sample.map(e => validateIndexUrl(e.url)));
+    const valid = results.filter(r => r.valid).length;
+    return res.json({ success: true,
+      summary: { checked: results.length, valid, invalid: results.length - valid, validPct: `${((valid/results.length)*100).toFixed(1)}%` },
+      results });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// /api/index/clear — clear the entire index (?confirm=yes required)
-app.get('/api/index/clear', (req, res) => {
-  if (req.query.confirm !== 'yes') return res.status(400).json({ success: false, error: 'Add ?confirm=yes' });
-  if (isBulkScrapeActive()) return res.status(409).json({ success: false, error: 'Cannot clear while bulk scrape is running' });
-  clearIndex();
-  return res.json({ success: true, message: 'Index cleared' });
+// /api/index/validate-url — validate one specific URL
+app.get('/api/index/validate-url', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: '"url" required' });
+  try {
+    return res.json({ success: true, result: await validateIndexUrl(url) });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// /api/index/crawl-debug — fetch the NBC listings page raw and show what links were found
-// USE THIS FIRST to verify your server can reach NBC and see the URL format
-// ?url=   override the listing URL to test
-// ?raw=true   include first 3000 chars of HTML in response
-app.get('/api/index/crawl-debug', async (req, res) => {
-  const axios = (await import('axios')).default;
-  const cheerio = await import('cheerio');
-
-  const urlsToTry = [
-    req.query.url as string || '',
-    'https://www.notebookcheck.net/Reviews.55.0.html',
-  ].filter(Boolean);
-
-  const results: any[] = [];
-
-  for (const testUrl of urlsToTry) {
-    const t0 = Date.now();
-    try {
-      const resp = await axios.get(testUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Referer': 'https://www.notebookcheck.net/',
-        },
-        timeout: 12000,
-        maxRedirects: 5,
-      });
-
-      const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-      const $ = cheerio.load(html);
-
-      // Extract ALL links matching the NBC article pattern
-      const allLinks: string[] = [];
-      const reviewLinks: string[] = [];
-      const phoneLinks: string[] = [];
-      $('a[href]').each((_: any, el: any) => {
-        let href = $(el).attr('href') || '';
-        if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
-        href = href.split('?')[0];
-        if (!href.includes('notebookcheck.net')) return;
-        if (!/\.\d{4,}\.0\.html$/.test(href)) return;
-        allLinks.push(href);
-        const slug = href.split('/').pop() || '';
-        if (/review|smartphone|phone/i.test(slug)) reviewLinks.push(href);
-        // Require smartphone/iPhone/phone but exclude headphone/earphone/etc
-        const hasPhone2 = /smartphone|(?<![a-z])phone(?![a-z])|iphone/i.test(slug);
-        const isNotPhone2 = /headphone|earphone|microphone|vacuum|robot|calendar|smartwatch|tablet|laptop|notebook|macbook|case[-_]review|charger/i.test(slug);
-        if (hasPhone2 && !isNotPhone2) phoneLinks.push(href);
-      });
-
-      // Pagination links — NBC uses ns_page=
-      const pageLinks: string[] = [];
-      $('a[href]').each((_: any, el: any) => {
-        const href = $(el).attr('href') || '';
-        if (/ns_page=\d+|[?&]page=\d+/.test(href)) pageLinks.push(href);
-      });
-      const maxNsPage = pageLinks.reduce((max: number, h: string) => {
-        const m = h.match(/ns_page=(\d+)/);
-        return m ? Math.max(max, parseInt(m[1])) : max;
-      }, 1);
-
-      results.push({
-        url: testUrl,
-        status: resp.status,
-        fetchMs: Date.now() - t0,
-        htmlLength: html.length,
-        allArticleLinks: allLinks.length,
-        reviewLinks: reviewLinks.length,
-        phoneOnlyLinks: phoneLinks.length,
-        note: phoneLinks.length < reviewLinks.length
-          ? `${reviewLinks.length - phoneLinks.length} non-phone reviews filtered out (laptops/headphones/etc)`
-          : 'all review links are phones',
-        samplePhoneLinks: phoneLinks.slice(0, 5),
-        sampleNonPhoneLinks: reviewLinks.filter(u => !phoneLinks.includes(u)).slice(0, 3),
-        paginationLinks: [...new Set(pageLinks)].slice(0, 5),
-        maxPageDetected: maxNsPage,
-        htmlSnippet: req.query.raw === 'true' ? html.slice(0, 3000) : undefined,
-      });
-
-      // Stop after first URL that has phone results (don't test further URLs)
-      if (phoneLinks.length > 0) {
-        // Test page 2 to confirm pagination works, only for the winning URL
-        const page2Url = testUrl.includes('ns_page') ? null : `${testUrl.split('?')[0]}?&ns_page=2`;
-        if (page2Url && !testUrl.includes('ns_page=2')) {
-          try {
-            const r2 = await axios.get(page2Url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, timeout: 8000 });
-            const $2 = cheerio.load(r2.data);
-            const p2links: string[] = [];
-            $2('a[href]').each((_: any, el: any) => {
-              let h = $2(el).attr('href') || '';
-              if (h.startsWith('/')) h = 'https://www.notebookcheck.net' + h;
-              h = h.split('?')[0];
-              if (!h.includes('notebookcheck.net') || !/\.\d{4,}\.0\.html$/.test(h)) return;
-              const s = h.split('/').pop() || '';
-              const hp = /smartphone|(?<![a-z])phone(?![a-z])|iphone/i.test(s);
-              const np = /headphone|earphone|vacuum|robot|calendar|smartwatch|tablet|laptop/i.test(s);
-              if (hp && !np) p2links.push(h);
-            });
-            (results[results.length - 1] as any).page2Check = { url: page2Url, phoneLinks: p2links.length, sample: p2links.slice(0, 3) };
-          } catch(e: any) {
-            (results[results.length - 1] as any).page2Check = { url: page2Url, error: e.message };
-          }
-        }
-        break;
-      }
-
-    } catch (e: any) {
-      results.push({
-        url: testUrl,
-        status: e?.response?.status || 0,
-        fetchMs: Date.now() - t0,
-        error: e.message,
-      });
-    }
+// /api/index/errors — list error entries
+app.get('/api/index/errors', async (req, res) => {
+  try {
+    const result = await getIndexEntries({ status: 'error', brand: req.query.brand as string,
+      limit: Math.min(parseInt(req.query.limit as string || '50'), 200) });
+    return res.json({ success: true, total: result.total,
+      entries: result.entries.map(e => ({ url: e.url, title: e.title, brand: e.brand, retries: e.retries, errorMsg: e.errorMsg })) });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
   }
+});
 
-  const winner = results.find(r => (r.phoneOnlyLinks || r.reviewLinks || 0) > 0);
-  return res.json({
-    success: !!winner,
-    diagnosis: winner
-      ? `Found ${winner.phoneOnlyLinks ?? winner.reviewLinks} phone review links at ${winner.url}`
-      : '❌ No review links found on any URL — check if your server can reach notebookcheck.net',
-    winner: winner || null,
-    allResults: results,
-  });
+// /api/index/reset-errors — reset all errors to pending
+app.get('/api/index/reset-errors', async (req, res) => {
+  try {
+    const count = await resetErrors();
+    return res.json({ success: true, resetCount: count, queue: await getQueueStats() });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/reset-url — reset one URL to pending
+app.get('/api/index/reset-url', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: '"url" required' });
+  try {
+    const ok = await resetEntry(url);
+    return res.json({ success: ok, message: ok ? 'Reset to pending' : 'URL not in index', url });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/brands — brand coverage
+app.get('/api/index/brands', async (req, res) => {
+  try {
+    return res.json({ success: true, brands: await getBrandBreakdown() });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/reset-crawl-lock — unstick a hung crawl lock
+app.get('/api/index/reset-crawl-lock', async (req, res) => {
+  try {
+    await resetCrawlLock();
+    return res.json({ success: true, message: 'Crawl lock cleared. Safe to crawl again.' });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/clear — wipe the entire index (?confirm=yes)
+app.get('/api/index/clear', async (req, res) => {
+  if (req.query.confirm !== 'yes') return res.status(400).json({ success: false, error: 'Add ?confirm=yes' });
+  try {
+    await clearIndex();
+    return res.json({ success: true, message: 'Index cleared from Redis' });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/crawl-debug — test connectivity + phone link detection
+app.get('/api/index/crawl-debug', async (req, res) => {
+  const axios2 = (await import('axios')).default;
+  const cheerio2 = await import('cheerio');
+  const testUrl = (req.query.url as string) || 'https://www.notebookcheck.net/Reviews.55.0.html';
+  const t0 = Date.now();
+  try {
+    const resp = await axios2.get(testUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        Referer: 'https://www.notebookcheck.net/' }, timeout: 12000 });
+    const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+    const phoneLinks = extractPhoneUrls(html);
+
+    // Check page 2
+    let page2: any = null;
+    try {
+      const r2 = await axios2.get(`${testUrl.split('?')[0]}?&ns_page=2`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' }, timeout: 8000 });
+      const pl2 = extractPhoneUrls(typeof r2.data === 'string' ? r2.data : JSON.stringify(r2.data));
+      page2 = { phoneLinks: pl2.length, sample: pl2.slice(0, 3).map(p => p.url) };
+    } catch (e2: any) { page2 = { error: e2.message }; }
+
+    return res.json({
+      success: phoneLinks.length > 0,
+      diagnosis: phoneLinks.length > 0 ? `Found ${phoneLinks.length} phone links on page 1` : 'No phone links found',
+      page1: { url: testUrl, status: 200, fetchMs: Date.now() - t0, htmlLength: html.length, phoneLinks: phoneLinks.length,
+        sample: phoneLinks.slice(0, 5).map(p => p.url) },
+      page2,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message, fetchMs: Date.now() - t0 });
+  }
 });
 
 module.exports = app;
