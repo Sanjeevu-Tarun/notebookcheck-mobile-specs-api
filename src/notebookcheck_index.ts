@@ -481,7 +481,8 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
 }
 
 
-// ── SCRAPE INDEXED DEVICE ────────────────────────────────────────────────────export async function clearScrapeCache(url: string): Promise<void> {
+// ── SCRAPE INDEXED DEVICE ────────────────────────────────────────────────────
+export async function clearScrapeCache(url: string): Promise<void> {
   const { clearDeviceCache } = await import('./notebookcheck');
   await clearDeviceCache(url);
 }
