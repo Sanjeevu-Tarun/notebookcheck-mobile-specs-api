@@ -189,13 +189,11 @@ function extractBrand(title: string): string {
 
 export function extractPhoneUrls(html: string): Array<{ url: string; title: string }> {
   const $ = cheerio.load(html);
-  const out: Array<{ url: string; title: string }> = [];
-  const seen = new Set<string>();
+  // Map: normalised device name → { url, title, isReview }
+  // Keeps only one entry per device, always preferring the NBC internal review URL
+  // (slug contains "-review-") over the external/library aggregator page.
+  const best = new Map<string, { url: string; title: string; isReview: boolean }>();
 
-  // The Chronological page (Chronological-sorting.2690.0.html) renders each entry as:
-  //   <a href="/Samsung-Galaxy-S26-Ultra.1244015.0.html">Samsung Galaxy S26 Ultra</a> (Smartphone)
-  // The "(Smartphone)" label is a text node inside the same parent element as the <a>.
-  // We check the parent element's full text — this is the ground truth type signal.
   $('a[href]').each((_, el) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -210,21 +208,35 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./i.test(slug)) return;
     if (/-Series\./i.test(slug)) return;
 
-    // Check parent element text for "(Smartphone)" label — set by notebookcheck on every entry.
-    // This is the only filter needed: Tablets show "(Tablet)", laptops show "(Notebook)" etc.
+    // The Chronological page labels each entry with its type in the parent element text.
+    // "(Smartphone)" = keep. "(Tablet)", "(Notebook)", "(Gaming)" etc. = skip.
     const parentText = $(el).parent().text();
     if (!/\(Smartphone\)/i.test(parentText)) return;
-
-    if (seen.has(href.toLowerCase())) return;
-    seen.add(href.toLowerCase());
 
     const title = ($(el).attr('title') || $(el).text().trim() || '').replace(/\s+/g, ' ').trim().slice(0, 200);
     if (title.length < 5) return;
 
-    out.push({ url: href, title });
+    // NBC internal reviews have "-review-" in their slug (e.g. Samsung-Galaxy-S25-Ultra-review-...).
+    // External/library aggregator pages do not (e.g. Samsung-Galaxy-S25-Ultra.975474.0.html).
+    // Internal reviews always have full specs, benchmarks and images — always prefer them.
+    const isReview = /-review-/i.test(slug);
+
+    // Dedup key: normalised title (lowercased, no punctuation).
+    // Both "Samsung-Galaxy-S25-Ultra-review-..." and "Samsung-Galaxy-S25-Ultra.975474.0.html"
+    // share the same device name → only keep the review URL.
+    const key = title.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+
+    const existing = best.get(key);
+    if (!existing) {
+      best.set(key, { url: href, title, isReview });
+    } else if (isReview && !existing.isReview) {
+      // Upgrade: replace library page with the full NBC review
+      best.set(key, { url: href, title, isReview });
+    }
+    // If existing is already a review, keep it (first-seen review wins)
   });
 
-  return out;
+  return Array.from(best.values()).map(({ url, title }) => ({ url, title }));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -432,11 +444,13 @@ function wordBoundaryRe(word: string): RegExp {
 // Rules:
 //   1. ALL query words must appear in the title (hard reject if any missing)
 //   2. Exact match → 10000, title-contains-query → 8000
-//   3. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
-//      (e.g. query "vivo x300" vs title "Vivo X300 Pro" → penalised but still wins
-//       if no other entry scores higher AND the post-search hard-reject doesn't fire)
-//   4. Shorter title = small length bonus (more precise match)
-function scoreIndexMatch(entryTitle: string, query: string): number {
+//   3. +3000 bonus if the URL slug contains "-review-" (NBC internal review page)
+//      This ensures the full-spec NBC review always beats the external/library page
+//      for the same device when both are in the index (defence-in-depth alongside
+//      the dedup logic in extractPhoneUrls).
+//   4. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
+//   5. Shorter title = small length bonus (more precise match)
+function scoreIndexMatch(entryTitle: string, query: string, entryUrl = ''): number {
   const d = cleanIndexTitle(entryTitle);
   const q = query.toLowerCase().trim();
   const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
@@ -446,9 +460,14 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   // Hard reject: any query word missing from the title
   if (!qWords.every((w: string) => wordIn(w, d))) return -1;
 
+  // Strong bonus for NBC internal review pages (slug has "-review-").
+  // Applied to ALL score paths so the internal review always beats the external/library
+  // aggregator page for the same device, even on exact-match scores.
+  const reviewBonus = /-review-/i.test(entryUrl) ? 3000 : 0;
+
   // Exact or contains match — highest confidence
-  if (d === q) return 10000;
-  if (d.includes(q)) return 8000;
+  if (d === q) return 10000 + reviewBonus;
+  if (d.includes(q)) return 8000 + reviewBonus;
 
   // Penalise extra variant words in title that query didn't include
   const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
@@ -460,7 +479,7 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   // Bonus for shorter title (fewer extra words = closer match)
   const lengthBonus = Math.max(0, 500 - d.length * 5);
 
-  return 5000 - penalty + lengthBonus;
+  return 5000 + reviewBonus - penalty + lengthBonus;
 }
 
 export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
@@ -482,7 +501,7 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
   let bestScore = -1;
 
   for (const entry of flat) {
-    const score = scoreIndexMatch(entry.title, normalized);
+    const score = scoreIndexMatch(entry.title, normalized, entry.url);
     if (score > bestScore) {
       bestScore = score;
       best = { url: entry.url, title: entry.title };
