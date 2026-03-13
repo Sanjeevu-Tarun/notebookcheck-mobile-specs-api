@@ -72,44 +72,75 @@ app.get('/api/phone', async (req, res) => {
   }
 });
 
-// /api/phone/debug — full timing: search ms + scrape ms + per-strategy breakdown
+// /api/phone/debug — full timing breakdown: index lookup → scrape → fallback to SearXNG
 app.get('/api/phone/debug', async (req, res) => {
-  const q = (req.query.q as string) || 'iphone 17 pro max';
+  const q = (req.query.q as string) || 'samsung s25 ultra';
+  const nocache = req.query.nocache === '1';
   const t0 = Date.now();
 
-  const { getNotebookCheckDataFast, scrapeNotebookCheckDevice } = await import('./src/notebookcheck');
+  const { searchIndex, scrapeIndexedDevice, clearScrapeCache, rebuildSearchIndex } = await import('./src/notebookcheck_index');
 
-  // Search with timing
-  const ts0 = Date.now();
-  const nbcData = await getNotebookCheckDataFast(q).catch(() => null);
-  const searchMs = Date.now() - ts0;
+  // ── Step 1: Index search ──────────────────────────────────────────────────
+  const ti0 = Date.now();
+  const indexMatch = await searchIndex(q).catch(() => null);
+  const indexSearchMs = Date.now() - ti0;
 
-  // Scrape timing (already done inside getNotebookCheckDataFast, but we log separately)
-  const scrapeResult = nbcData && !('error' in nbcData) ? {
-    ok: true,
-    scrapeMs: 0, // included in searchMs above
-    title: (nbcData as any).title,
-    url: (nbcData as any).reviewUrl,
-    hasBenchmarks: Object.values((nbcData as any).benchmarks).some((b: any) => b.length > 0),
-    hasSpecs: Object.keys((nbcData as any).specs).length > 2,
-    imageCounts: {
-      device: (nbcData as any).images.device.length,
-      cameraSamples: (nbcData as any).images.cameraSamples.length,
-      screenshots: (nbcData as any).images.screenshots.length,
-      charts: (nbcData as any).images.charts.length,
-    },
-  } : { ok: false };
+  let source: string;
+  let data: any = null;
+  let indexScrapeMs = 0;
+  let searxngMs = 0;
+  let cached = false;
+
+  if (indexMatch) {
+    // ── Step 2: Scrape the matched URL (or return from cache) ─────────────
+    if (nocache) await clearScrapeCache(indexMatch.url).catch(() => {});
+    const ts0 = Date.now();
+    const result = await scrapeIndexedDevice(indexMatch.url).catch(() => null);
+    indexScrapeMs = Date.now() - ts0;
+
+    if (result?.success) {
+      data = result.data;
+      cached = !!result.cached;
+      source = cached ? 'redis-cache' : 'index-scrape';
+    }
+  }
+
+  // ── Step 3: SearXNG fallback if index missed or scrape failed ─────────
+  if (!data) {
+    const { getNotebookCheckDataFast } = await import('./src/notebookcheck');
+    const ts0 = Date.now();
+    data = await getNotebookCheckDataFast(q).catch(() => null);
+    searxngMs = Date.now() - ts0;
+    source = 'searxng-fallback';
+  }
 
   const totalMs = Date.now() - t0;
-  const strat = { bestMatch: nbcData && !('error' in nbcData) ? { url: (nbcData as any).reviewUrl, name: (nbcData as any).title } : null, elapsedMs: searchMs };
-  const gsma = null;
 
   res.json({
     query: q,
+    source,
     totalMs,
-    searchMs,
-    bestMatch: strat.bestMatch,
-    scrape: scrapeResult,
+    timing: {
+      indexSearchMs,
+      indexScrapeMs: indexScrapeMs || undefined,
+      searxngMs: searxngMs || undefined,
+    },
+    cached,
+    indexMatch: indexMatch ? { url: indexMatch.url, title: indexMatch.title } : null,
+    result: data ? {
+      title: data.title,
+      url: data.reviewUrl || data.sourceUrl,
+      rating: data.rating,
+      hasBenchmarks: data.benchmarks ? Object.values(data.benchmarks).some((b: any) => b.length > 0) : false,
+      hasSpecs: data.specs ? Object.keys(data.specs).length > 2 : false,
+      imageCounts: data.images ? {
+        device: data.images.device?.length || 0,
+        cameraSamples: data.images.cameraSamples?.length || 0,
+        screenshots: data.images.screenshots?.length || 0,
+        charts: data.images.charts?.length || 0,
+      } : null,
+    } : null,
+    error: data ? undefined : 'Not found in index or SearXNG',
   });
 });
 
