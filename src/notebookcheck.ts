@@ -299,8 +299,13 @@ export interface NBCDebugResult {
 //  4. bodyText truncation removed — full normalised body used for all regex passes.
 //  5. resolveSearchResult() is fully synchronous — no extra HTTP round-trip.
 //     getReviewFromDevicePage (was ~2–3s extra latency) removed entirely.
-//  6. searchViaNBCSearch removed — SearXNG is the sole search path.
+//  6. searchViaNBC uses POST with TYPO3 tx_indexedsearch_pi2[search][sword].
+//     NBC's search is a TYPO3 Indexed Search form — GET ?word= is silently
+//     ignored and returns the bare search page with zero results.
+//     Fix: POST application/x-www-form-urlencoded to Search.8222.0.html.
 //  7. scrapeNotebookCheckDevice() accepts optional AbortSignal.
+//  8. getNotebookCheckDataFast / searchNotebookCheck use NBC direct search
+//     as primary, SearXNG only as fallback (no longer bypass searchViaNBC).
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ── AUTO-DERIVED CACHE VERSION ────────────────────────────────────────────────
@@ -733,26 +738,46 @@ function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): 
 // ─────────────────────────────────────────────────────────────────────────────
 // SEARCH: NBC DIRECT — truly unlimited, zero external dependencies
 //
-// Queries NotebookCheck's own search endpoint directly.
+// Queries NotebookCheck's own search endpoint directly via POST.
+// NBC uses TYPO3 Indexed Search — the form submits as POST with the parameter:
+//   tx_indexedsearch_pi2[search][sword]=<query>
+// A GET request with ?word= is silently ignored by TYPO3 and returns zero results.
+//
 // NBC's own search has no bot detection, no rate limiting, no cloud IP blocks.
 // It's your target site — querying it directly is the only truly unlimited approach.
-//
-// NBC search URL: https://www.notebookcheck.net/Search.8222.0.html?word=<query>
-// NBC smartphones listing: https://www.notebookcheck.net/Smartphones.8.0.html
-// Both return HTML with review links — parsed with cheerio.
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchViaNBC(nq: string, oq: string, signal?: AbortSignal): Promise<SearchResult[]> {
   const seen = new Set<string>();
   const results: SearchResult[] = [];
 
   const tryQuery = async (q: string) => {
-    // Correct NBC search URL — Search.8222.0.html, NOT Search.html (that 404s)
-    const url = `https://www.notebookcheck.net/Search.8222.0.html?word=${encodeURIComponent(q)}`;
+    // NBC search is a TYPO3 Indexed Search — it uses POST, not GET.
+    // The GET ?word= parameter is silently ignored by TYPO3, returning the bare
+    // search page with zero results. The correct POST body field is:
+    //   tx_indexedsearch_pi2[search][sword]=<query>
+    const NBC_SEARCH_URL = 'https://www.notebookcheck.net/Search.8222.0.html';
+    const postBody = new URLSearchParams({
+      'tx_indexedsearch_pi2[search][sword]': q,
+      'tx_indexedsearch_pi2[action]': 'search',
+    }).toString();
+
     try {
-      const html = await fetchUrl(url, 6000, {
-        'Referer': 'https://www.notebookcheck.net/',
-        'Accept': 'text/html,application/xhtml+xml',
-      }, 0, signal);
+      const { data: htmlRaw } = await sharedAxios.post<string>(NBC_SEARCH_URL, postBody, {
+        headers: {
+          'User-Agent':       randomUA(),
+          'Content-Type':     'application/x-www-form-urlencoded',
+          'Accept':           'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language':  'en-US,en;q=0.9',
+          'Accept-Encoding':  'gzip, deflate, br',
+          'Referer':          'https://www.notebookcheck.net/',
+          'Origin':           'https://www.notebookcheck.net',
+        },
+        timeout: 6000,
+        maxRedirects: 3,
+        decompress: true,
+        signal: signal as any,
+      });
+      const html = typeof htmlRaw === 'string' ? htmlRaw : JSON.stringify(htmlRaw);
 
       const $ = cheerio.load(html);
 
@@ -3076,11 +3101,21 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
   // PERF: fire full-result cache check and SearXNG search in parallel.
   // On a cache miss the search has already been running while Redis was checked.
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, searchResults] = await Promise.all([
+  // Fire cache check and NBC direct search in parallel.
+  // NBC direct search (POST) is the primary path — no external dependencies,
+  // no IP blocking, no SearXNG rate limits.
+  const [cached, nbcResults] = await Promise.all([
     getCacheAs<NBCDeviceData | NBCError>(ck),
-    searchViaSearXNG(nq, oq),
+    searchViaNBC(nq, oq),
   ]);
   if (cached) { log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 }); return cached; }
+
+  // Fallback to SearXNG only if NBC direct search returned nothing
+  let searchResults = nbcResults;
+  if (!searchResults.length) {
+    log('info', 'search.fallback_to_searxng', { query: nq });
+    searchResults = await searchViaSearXNG(nq, oq);
+  }
 
   log('info', 'stage.search', { query, ms: Date.now() - t0, count: searchResults.length });
   if (!searchResults.length) return null;
@@ -3106,11 +3141,17 @@ export async function getNotebookCheckDataFast(query: string): Promise<NBCDevice
 export async function searchNotebookCheck(query: string): Promise<SearchResult[]> {
   const ck = `nbc:suggestions:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, results] = await Promise.all([
+  const [cached, nbcResults] = await Promise.all([
     getCacheAs<SearchResult[]>(ck),
-    searchViaSearXNG(nq, oq),
+    searchViaNBC(nq, oq),
   ]);
   if (cached) return cached;
+  // Fallback to SearXNG if NBC direct search returned nothing
+  let results = nbcResults;
+  if (!results.length) {
+    log('info', 'search.fallback_to_searxng', { query: nq });
+    results = await searchViaSearXNG(nq, oq);
+  }
   if (!results.length) return [];
   const sorted = results.sort((a, b) => b.score - a.score);
   setCache(ck, sorted);
@@ -3145,18 +3186,30 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
   const oq = query.trim(), nq = normalizeQuery(query);
 
   // Stage 0: mem-only cache check (instant — no Redis HTTP call in debug)
-  // Redis latency (~500-700ms cold TLS) would skew the timing numbers.
-  // The hot path uses Redis but we time them separately here for clarity.
   const fullCk = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const memCached = memGet(fullCk) as NBCDeviceData | null;
   const cacheHit = memCached !== null;
 
-  // Stage 1: SearXNG search — run unconditionally so timing is always shown
+  // Stage 1: NBC direct search (POST) — primary path, always timed
   const ts = Date.now();
-  const results = await searchViaSearXNG(nq, oq);
-  const searchMs = Date.now() - ts;
+  let results = await searchViaNBC(nq, oq);
+  const nbcSearchMs = Date.now() - ts;
+  const nbcResults = [...results];
 
-  // Stage 2: Redis check (timed separately so you can see its cost)
+  // Stage 1b: SearXNG fallback — only if NBC returned nothing
+  let searxngResults: SearchResult[] = [];
+  let searxngMs = 0;
+  if (!results.length) {
+    const tss = Date.now();
+    searxngResults = await searchViaSearXNG(nq, oq);
+    searxngMs = Date.now() - tss;
+    results = searxngResults;
+    log('info', 'debug.fallback_to_searxng', { query: nq, nbcCount: 0 });
+  }
+
+  const searchMs = nbcSearchMs + searxngMs;
+
+  // Stage 2: Redis check (timed separately)
   const tr = Date.now();
   const redisCached = !cacheHit ? await getCacheAs<NBCDeviceData>(fullCk) : null;
   const redisMs = Date.now() - tr;
@@ -3188,9 +3241,9 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
       cacheHit:  cacheHit || redisHit,
       memHit:    cacheHit,
       redisHit,
-      redisMs,    // how long Redis GET took — watch for >200ms (cold TLS)
-      searchMs,   // SearXNG round-trip
-      scrapeMs,   // NBC page fetch + parse
+      redisMs,
+      searchMs,
+      scrapeMs,
       totalMs,
     },
     elapsedMs: totalMs,
@@ -3198,7 +3251,10 @@ export async function debugNBCSearch(query: string): Promise<NBCDebugResult> {
     scrapeOk,
     ...(scrapeError ? { scrapeError } : {}),
     strategies: {
-      searxng: { count: results.length, top5: results.slice(0, 5) },
+      nbc_direct: { count: nbcResults.length, top5: nbcResults.slice(0, 5) },
+      ...(searxngResults.length > 0 || !nbcResults.length
+        ? { searxng: { count: searxngResults.length, top5: searxngResults.slice(0, 5) } }
+        : {}),
     },
   };
 }
