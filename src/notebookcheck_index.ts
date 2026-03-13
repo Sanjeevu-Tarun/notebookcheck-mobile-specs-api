@@ -343,12 +343,15 @@ async function saveIndexToRedis(): Promise<void> {
 // We try Format A first; if it returns 0 results we fall back to Format B.
 // NBC uses ns_page= for pagination (not page=) — discovered from live response
 // The dedicated smartphone reviews category page is the correct starting point
-const NBC_SMARTPHONES_BASE = 'https://www.notebookcheck.net/Smartphones.1311.0.html';
-const NBC_REVIEWS_BASE_A   = 'https://www.notebookcheck.net/Reviews.55.0.html';
+// NBC Reviews listing — the only working URL. Smartphones.1311.0.html is 404.
+// Each page has ~10-16 phone reviews mixed with laptops/tablets/accessories.
+// Phone reviews are identified by "smartphone"/"phone"/"iPhone" in the URL slug.
+// With ~2000+ phone reviews and ~12 per page, expect ~170 pages to crawl.
+const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html';
 
 export interface CrawlOptions {
-  maxPages?:       number;   // cap at N pages (default: unlimited)
-  delayMs?:        number;   // delay between page fetches (default: 800ms)
+  maxPages?:       number;   // safety cap (default: 999). Crawl auto-stops when a page has 0 phones.
+  delayMs?:        number;   // delay between page fetches ms (default: 600)
   forceRecrawl?:   boolean;  // re-fetch even if index is fresh (default: false)
 }
 
@@ -360,7 +363,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     };
   }
 
-  const { maxPages = 999, delayMs = 800, forceRecrawl = false } = opts;
+  const { maxPages = 999, delayMs = 600, forceRecrawl = false } = opts;
 
   // If we already have a recent index (< 6 hours) and not forced, skip
   if (!forceRecrawl && lastCrawlStats && indexStore.size > 0) {
@@ -381,28 +384,18 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
 
   try {
     // ── STEP 1: Fetch page 1 to determine total page count ──────────────────
-    // Try the dedicated smartphone category page first (/Smartphones.1311.0.html)
-    // Fall back to the mixed Reviews page if it fails or returns no results
-    let baseUrl = NBC_SMARTPHONES_BASE;
-    let firstPageUrl = NBC_SMARTPHONES_BASE;
+    // NBC Reviews.55.0.html — mixed reviews page, ~100 links per page, ~12 phones each.
+    // Pagination: ?&ns_page=N. No server-side smartphone filter exists.
+    // We filter client-side by slug pattern (smartphone|iPhone|phone in URL).
+    // Blind pagination: keep fetching until a page returns 0 phone links.
+    const baseUrl = NBC_REVIEWS_BASE;
+    const firstPageUrl = NBC_REVIEWS_BASE;
 
     log('info', 'index.fetch_page', { page: 1, url: firstPageUrl });
-    let firstHtml = await fetchPage(firstPageUrl);
-    let page1Entries = extractReviewUrls(firstHtml);
-
-    if (page1Entries.length === 0) {
-      log('info', 'index.try_reviews_fallback', { reason: 'Smartphone category page returned 0' });
-      baseUrl = NBC_REVIEWS_BASE_A;
-      firstPageUrl = NBC_REVIEWS_BASE_A;
-      firstHtml = await fetchPage(firstPageUrl);
-      page1Entries = extractReviewUrls(firstHtml);
-    }
-
-    // Use blind pagination — detectTotalPages only shows the current page link (ns_page=1)
-    // on page 1. We instead keep fetching until a page returns 0 results.
-    // Cap at maxPages as a safety limit.
-    const pagesToFetch = maxPages;
-    log('info', 'index.crawl_mode', { mode: 'blind_pagination', baseUrl, page1Count: page1Entries.length });
+    const firstHtml = await fetchPage(firstPageUrl);
+    const page1Entries = extractReviewUrls(firstHtml);
+    const pagesToFetch = maxPages; // blind — stop when page returns 0 results
+    log('info', 'index.crawl_mode', { mode: 'blind_pagination', baseUrl, page1Count: page1Entries.length, maxPages });
     for (const { url, title } of page1Entries) {
       const isNew = !indexStore.has(url);
       if (isNew || forceRecrawl) {
@@ -427,7 +420,7 @@ export async function crawlNBCSmartphoneIndex(opts: CrawlOptions = {}): Promise<
     for (let page = 2; page <= pagesToFetch; page++) {
       await new Promise(r => setTimeout(r, delayMs));
 
-      const pageUrl = `${baseUrl}?&ns_page=${page}`;
+      const pageUrl = `${NBC_REVIEWS_BASE}?&ns_page=${page}`;
       log('info', 'index.fetch_page', { page, url: pageUrl });
 
       try {

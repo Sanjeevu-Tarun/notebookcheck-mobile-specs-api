@@ -825,11 +825,6 @@ app.get('/api/index/crawl-debug', async (req, res) => {
 
   const urlsToTry = [
     req.query.url as string || '',
-    // Try the dedicated smartphone category page first
-    'https://www.notebookcheck.net/Smartphones.1311.0.html',
-    // Then try page 2 of smartphones to confirm pagination works
-    'https://www.notebookcheck.net/Smartphones.1311.0.html?&ns_page=2',
-    // Fallback: mixed reviews page
     'https://www.notebookcheck.net/Reviews.55.0.html',
   ].filter(Boolean);
 
