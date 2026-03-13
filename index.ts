@@ -853,11 +853,13 @@ app.get('/api/index/migrate-review-urls', async (req, res) => {
   }
 });
 
-// /api/index/purge-library-duplicates — delete all library URLs that have a review URL for same device
+// /api/index/purge-library-duplicates — delete library URLs that have a review URL + junk titles
 app.get('/api/index/purge-library-duplicates', async (req, res) => {
   try {
     const result = await purgeLibraryDuplicates();
-    return res.json({ success: true, ...result });
+    return res.json({ success: true, ...result,
+      message: `Purged ${result.purged} entries (${result.reasons.libraryDuplicate} library dupes, ${result.reasons.junkTitle} junk titles). ${result.kept} entries remain.`
+    });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }

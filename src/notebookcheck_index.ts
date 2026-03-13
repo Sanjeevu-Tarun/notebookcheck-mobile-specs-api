@@ -491,36 +491,62 @@ export async function rebuildSearchIndex(): Promise<void> {
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
 }
 
-// Purge all library/aggregator entries from the index that already have a corresponding
-// internal review URL stored for the same device title.
-// Run this after migration to clean up stale library entries from Redis.
-export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: number }> {
+// Purge stale/junk entries from the index:
+//
+//  1. JUNK TITLES — entries whose title is longer than 80 chars are article snippets
+//     from the old crawl (e.g. "86% Smartphone with superlatives has its eye on the prize...")
+//     These are never clean device names and should be deleted unconditionally.
+//
+//  2. LIBRARY DUPLICATES — library URLs (no "-review-" in slug) whose device slug
+//     (the part before the first dot) matches a review URL already in the index.
+//     e.g. library:  Samsung-Galaxy-S25-Ultra.975474.0.html
+//          review:   Samsung-Galaxy-S25-Ultra-review-The-AI-phone.968346.0.html
+//     Both start with "samsung-galaxy-s25-ultra" → library is deleted.
+//
+// Safe to run multiple times. Rebuilds search index on completion.
+export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: number; reasons: Record<string, number> }> {
   const entries = await loadEntries();
+  const reasons: Record<string, number> = { junkTitle: 0, libraryDuplicate: 0 };
 
-  // Build a set of normalised titles that have a review URL
-  const reviewTitles = new Set<string>();
-  for (const e of Object.values(entries) as IndexEntry[]) {
-    if (/-review-/i.test(e.url)) {
-      reviewTitles.add(e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim());
-    }
+  // Build a set of device slug prefixes that have a review URL
+  // e.g. "samsung-galaxy-s25-ultra" from "Samsung-Galaxy-S25-Ultra-review-...968346.0.html"
+  const reviewPrefixes = new Set<string>();
+  for (const url of Object.keys(entries)) {
+    if (!/-review-/i.test(url)) continue;
+    const slug = url.split('/').pop() || '';
+    // Device prefix = everything before "-review-"
+    const prefix = slug.toLowerCase().split('-review-')[0];
+    if (prefix.length > 3) reviewPrefixes.add(prefix);
   }
 
-  // Delete any library entry whose title already has a review URL
-  let purged = 0;
+  const toDelete: string[] = [];
   for (const [url, e] of Object.entries(entries)) {
+    // 1. Junk title — article snippets have very long titles
+    if (e.title.length > 80) {
+      toDelete.push(url);
+      reasons.junkTitle++;
+      continue;
+    }
+
+    // 2. Library duplicate — non-review URL whose slug prefix matches a review entry
     if (!/-review-/i.test(url)) {
-      const key = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-      if (reviewTitles.has(key)) {
-        delete entries[url];
-        purged++;
+      const slug = url.split('/').pop() || '';
+      // Library slug prefix = everything before the numeric ID
+      // e.g. "Samsung-Galaxy-S25-Ultra.975474.0.html" → "samsung-galaxy-s25-ultra"
+      const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
+      if (reviewPrefixes.has(prefix)) {
+        toDelete.push(url);
+        reasons.libraryDuplicate++;
       }
     }
   }
 
+  for (const url of toDelete) delete entries[url];
+
   await saveEntries(entries);
   await rebuildSearchIndex();
 
-  return { purged, kept: Object.keys(entries).length };
+  return { purged: toDelete.length, kept: Object.keys(entries).length, reasons };
 }
 
 // Normalise the stored title for matching.
