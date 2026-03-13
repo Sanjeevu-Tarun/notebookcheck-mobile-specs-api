@@ -1194,12 +1194,36 @@ app.get('/api/index/reset-crawl-lock', async (req, res) => {
   }
 });
 
-// /api/index/clear — wipe the entire index (?confirm=yes)
+// /api/index/clear — LEGACY: only wipes 4 index keys (kept for compatibility)
 app.get('/api/index/clear', async (req, res) => {
   if (req.query.confirm !== 'yes') return res.status(400).json({ success: false, error: 'Add ?confirm=yes' });
   try {
     await clearIndex();
-    return res.json({ success: true, message: 'Index cleared from Redis' });
+    return res.json({ success: true, message: 'Index cleared from Redis (4 keys only — use /api/redis/flushdb for full wipe)' });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/redis/flushdb — FULL Redis wipe: deletes EVERY key in the database
+// Clears device cache, search cache, full-result cache, review_resolve cache,
+// index entries, search index, migration state — everything.
+// Requires ?confirm=yes to prevent accidental calls.
+app.get('/api/redis/flushdb', async (req, res) => {
+  if (req.query.confirm !== 'yes') {
+    return res.status(400).json({ success: false, error: 'Add ?confirm=yes to confirm full wipe' });
+  }
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    if (!rUrl || !rToken) throw new Error('UPSTASH_REDIS_REST_URL / TOKEN not set');
+    const resp = await axios2.post(
+      `${rUrl}/pipeline`,
+      [['FLUSHDB']],
+      { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    return res.json({ success: true, message: 'FLUSHDB — entire Redis database wiped', result: resp.data });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
   }
@@ -1567,7 +1591,7 @@ async function doFlush() {
   document.getElementById('flushMsg').textContent = 'wiping…';
   document.getElementById('flushBar').style.width = '35%';
   try {
-    const r = await fetch('/api/index/clear?confirm=yes');
+    const r = await fetch('/api/redis/flushdb?confirm=yes');
     const d = await r.json();
     document.getElementById('flushBar').style.width = '100%';
     document.getElementById('flushMsg').textContent = 'done — Redis cleared ✓';
