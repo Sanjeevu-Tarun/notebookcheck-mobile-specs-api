@@ -30,7 +30,7 @@ const LOCK_TTL      = 300;
 
 // SOURCE A — NBC Smartphones review listing (internal NBC reviews only, ~80 pages)
 // Each entry has "-review-" in its slug and contains full benchmarks/specs/images.
-const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/Reviews.55.0.html?&items_per_page=100&hide_youtube=1&hide_external_reviews=1&showHighlightedTags=1&tagArray%5B%5D=10&typeArray%5B%5D=1&id=55';
+const NBC_REVIEWS_BASE = 'https://www.notebookcheck.net/?&hide_date=1&hide_youtube=1&showHighlightedTags=1&tagArray%5B%5D=10&typeArray%5B%5D=1&id=48';
 
 // SOURCE B — Chronological listing (all device types, library/external pages)
 // Used only for phones that NBC hasn't written their own review for yet.
@@ -468,21 +468,23 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   const found: Array<{ url: string; title: string }> = [];
   const seen = new Set<string>();
 
+  // Source A page is pre-filtered to phones + internal reviews only.
+  // No need to check for -review- in the slug — trust the page content.
+  // Still skip junk slugs (comparisons, camera tests, etc.) just in case.
   $('a[href]').each((_, el) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
     href = href.split('?')[0];
     if (!href.includes('notebookcheck.net')) return;
-    if (!/-review[-_.]/i.test(href)) return;      // SOURCE A: review URLs only (-review- or -review.)
     if (!/\.\d{4,}\.0\.html$/.test(href)) return;
     if (seen.has(href.toLowerCase())) return;
-    if (isJunkSlug(href.split('/').pop() || '')) return; // skip comparisons, camera tests, etc.
+    const slug = href.split('/').pop() || '';
+    if (isJunkSlug(slug)) return;
     seen.add(href.toLowerCase());
 
     const title = ($(el).attr('title') || $(el).text().trim() || '')
       .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    // Clean review title: strip everything after " - " (article subtitle)
-    const cleanTitle = title.split(' - ')[0].split(' review')[0].trim();
+    const cleanTitle = title.split(' - ')[0].replace(/\breview\b/gi, '').replace(/\s+/g, ' ').trim();
     if (cleanTitle.length < 4) return;
     found.push({ url: href, title: cleanTitle });
   });
