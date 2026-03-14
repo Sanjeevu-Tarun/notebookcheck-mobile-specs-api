@@ -861,12 +861,14 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   return 5000 - penalty + lengthBonus;
 }
 
-export async function searchIndex(q: string): Promise<{ url: string; title: string } | null> {
-  // Normalize query the same way SearXNG does (alias resolution, brand expansion, etc.)
-  const { normalizeQuery } = await import('./notebookcheck');
-  const normalized = normalizeQuery(q).toLowerCase().trim();
-
-  // Load compact search index from Redis
+// Match user query directly against clean stored titles.
+// No normalizeQuery, no aliases, no circular imports.
+// Titles in Redis are already clean: "Samsung Galaxy S25 Ultra", "Google Pixel 9 Pro XL".
+// Strategy:
+//   1. All query words must appear in the title (hard filter)
+//   2. Title must not have variant words (ultra/pro/xl/...) that the query didn't ask for
+//   3. Among matches, prefer the one whose title is shortest (most specific to query)
+export async function searchIndex(q: string, _nq?: string): Promise<{ url: string; title: string } | null> {
   let flat: Array<{ url: string; title: string; slug: string }> = [];
   try {
     flat = await rGet(SEARCH_INDEX_KEY) as any[];
@@ -876,32 +878,41 @@ export async function searchIndex(q: string): Promise<{ url: string; title: stri
   }
   if (!flat?.length) return null;
 
-  let best: { url: string; title: string } | null = null;
-  let bestScore = -1;
+  // Tokenize the raw user query — lowercase words, 2+ chars
+  const rawWords = q.toLowerCase().trim().split(/\s+/).filter(w => w.length >= 2);
+  if (!rawWords.length) return null;
+
+  // Variant suffix list — if title has one of these but query doesn't, reject the entry
+  const VARIANTS = new Set([
+    'ultra','pro','plus','mini','lite','fe','max','edge',
+    'standard','turbo','fold','flip','xl','xr','se',
+    '5g','4g','go','slim','zoom','compact',
+  ]);
+
+  const candidates: Array<{ url: string; title: string; titleLen: number }> = [];
 
   for (const entry of flat) {
-    const score = scoreIndexMatch(entry.title, normalized);
-    if (score > bestScore) {
-      bestScore = score;
-      best = { url: entry.url, title: entry.title };
-    }
+    const t = entry.title.toLowerCase();
+
+    // Rule 1: every query word must appear in the title
+    if (!rawWords.every(w => t.includes(w))) continue;
+
+    // Rule 2: title must not contain variant words the query didn't ask for
+    const titleWords = new Set(t.split(/\s+/));
+    const queryWords = new Set(rawWords);
+    const hasExtraVariant = [...titleWords].some(
+      tw => VARIANTS.has(tw) && !queryWords.has(tw)
+    );
+    if (hasExtraVariant) continue;
+
+    candidates.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
   }
 
-  // Reject if no entry scored above -1 (no word-match at all)
-  if (bestScore < 0 || !best) return null;
+  if (!candidates.length) return null;
 
-  // Hard-reject: title has a variant suffix the query didn't ask for.
-  // e.g. query "vivo x300" must NOT return "Vivo X300 Pro" — that's a different device.
-  // e.g. query "vivo x300 pro" → title "Vivo X300 Pro" has no extra variant → allowed.
-  const VARIANT_SUFFIXES = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge',
-    'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
-  const cleanBestTitle = cleanIndexTitle(best.title);
-  const titleHasExtraVariant = VARIANT_SUFFIXES.some(
-    v => wordBoundaryRe(v).test(cleanBestTitle) && !wordBoundaryRe(v).test(normalized)
-  );
-  if (titleHasExtraVariant) return null; // wrong variant — let SearXNG handle it
-
-  return best;
+  // Pick the shortest matching title — closest match to what the user asked for
+  candidates.sort((a, b) => a.titleLen - b.titleLen);
+  return { url: candidates[0].url, title: candidates[0].title };
 }
 
 

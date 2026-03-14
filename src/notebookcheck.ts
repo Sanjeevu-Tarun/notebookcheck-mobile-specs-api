@@ -524,8 +524,16 @@ const NBC_ALIASES: Array<[string, string]> = [
   ['pixel',                 'Google Pixel'],
   ['iphone',                'Apple iPhone'],
   ['galaxy',                'Samsung Galaxy'],
+  ['s25 ultra',             'Samsung Galaxy S25 Ultra'],
+  ['s25 plus',              'Samsung Galaxy S25 Plus'],
+  ['s25+',                  'Samsung Galaxy S25 Plus'],
   ['s25',                   'Samsung Galaxy S25'],
+  ['s24 ultra',             'Samsung Galaxy S24 Ultra'],
+  ['s24 plus',              'Samsung Galaxy S24 Plus'],
+  ['s24+',                  'Samsung Galaxy S24 Plus'],
   ['s24',                   'Samsung Galaxy S24'],
+  ['s23 ultra',             'Samsung Galaxy S23 Ultra'],
+  ['s23+',                  'Samsung Galaxy S23 Plus'],
   ['s23',                   'Samsung Galaxy S23'],
   ['s22',                   'Samsung Galaxy S22'],
   ['fold',                  'Samsung Galaxy Z Fold'],
@@ -538,30 +546,46 @@ const NBC_ALIASES: Array<[string, string]> = [
 
 export function normalizeQuery(query: string): string {
   let q = query.toLowerCase().trim();
-  // Apply aliases longest-first. Once a prefix alias fires (e.g. "samsung galaxy z fold"),
-  // mark the covered prefix length so shorter overlapping aliases (e.g. "samsung galaxy",
-  // "galaxy") don't fire again on the same tokens and produce duplicates.
+
+  // Strip a leading brand prefix before alias expansion so that e.g.
+  // "samsung s25 ultra" → try aliases on "s25 ultra" → matches "s25 ultra" alias
+  // → "samsung galaxy s25 ultra" (clean, no duplicate "samsung").
+  // If no alias fires we put the brand back.
+  const BRAND_PREFIXES = [
+    'samsung ','apple ','google ','xiaomi ','oneplus ','oppo ',
+    'vivo ','motorola ','sony ','asus ','realme ','honor ','huawei ','nothing ',
+  ];
+  let strippedBrand = '';
+  for (const bp of BRAND_PREFIXES) {
+    if (q.startsWith(bp)) { strippedBrand = bp.trimEnd(); q = q.slice(bp.length); break; }
+  }
+
   let coveredPrefixLen = 0;
+  let aliasMatched = false;
   for (const [alias, replacement] of NBC_ALIASES) {
     const rep = replacement.toLowerCase();
-    // Prefix match — alias covers the start of the query
     if (q === alias || q.startsWith(alias + ' ') || q.startsWith(alias + '\t')) {
-      if (alias.length <= coveredPrefixLen) continue; // already handled by a longer alias
+      if (alias.length <= coveredPrefixLen) continue;
       q = rep + q.slice(alias.length);
       coveredPrefixLen = rep.length;
-      continue;
+      aliasMatched = true;
+      break; // prefix matched — done
     }
-    // Whole-word match anywhere in string — only if none of its words are already
-    // part of a previously expanded prefix (avoids "galaxy" re-firing on "samsung galaxy...")
-    if (coveredPrefixLen > 0) {
-      // Check if this alias overlaps with the already-expanded prefix
-      const aliasWords = alias.trim().split(/\s+/);
-      const prefixWords = q.slice(0, coveredPrefixLen).trim().split(/\s+/);
-      if (aliasWords.every(w => prefixWords.includes(w))) continue;
-    }
+    // Whole-word match only when no prefix already fired
+    if (coveredPrefixLen > 0) continue;
+    const repWords = rep.split(/\s+/);
+    const qWords = q.split(/\s+/);
+    if (repWords.every(w => qWords.includes(w))) continue;
     const esc = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    q = q.replace(new RegExp('\\b' + esc + '\\b', 'gi'), rep);
+    const after = q.replace(new RegExp('\\b' + esc + '\\b', 'gi'), rep);
+    if (after !== q) { q = after; aliasMatched = true; break; }
   }
+
+  // Re-add stripped brand only if alias didn't already include it
+  if (strippedBrand && !q.toLowerCase().includes(strippedBrand)) {
+    q = strippedBrand + ' ' + q;
+  }
+
   return q.trim();
 }
 
