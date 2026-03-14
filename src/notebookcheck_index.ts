@@ -195,6 +195,8 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
   if (resolved > 0) {
     Object.assign(entries, updates);
     await saveEntries(entries);
+    // Rebuild search index immediately so /api/phone can find upgraded URLs right away
+    rebuildSearchIndex().catch(() => {});
   }
 
   return { resolved, alreadyReview, noReview, total, offset: offset + RESOLVE_BATCH, done };
@@ -623,7 +625,9 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
       const resp = await _rax.post(`${rUrl}/pipeline`, pipeline,
         { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' } });
       resp.data.forEach((item: any, i: number) => {
-        if (item.result) resolveMapC[libToResolve[i].url] = item.result;
+        if (item.result) {
+          try { resolveMapC[libToResolve[i].url] = JSON.parse(item.result); } catch { resolveMapC[libToResolve[i].url] = item.result; }
+        }
       });
     } catch { /* cache miss */ }
   }
@@ -696,7 +700,9 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
         { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' } }
       );
       resp.data.forEach((item: any, i: number) => {
-        if (item.result) resolveMap[libraryOnly[i].url] = item.result;
+        if (item.result) {
+          try { resolveMap[libraryOnly[i].url] = JSON.parse(item.result); } catch { resolveMap[libraryOnly[i].url] = item.result; }
+        }
       });
     } catch { /* cache miss — resolveMap stays empty, use library URLs as-is */ }
   }
