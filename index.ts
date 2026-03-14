@@ -37,6 +37,7 @@ import {
   resetMigration,
   purgeLibraryDuplicates,
   recoverDeletedReviewUrls,
+  resolveLibraryUrlsPage,
   type CrawlPageResult,
   type MigrateResult,
 } from './src/notebookcheck_index';
@@ -923,13 +924,47 @@ app.get('/api/index/resolve-url', async (req, res) => {
   }
 });
 
-// /api/index/recover-review-urls — recover any review URLs accidentally deleted by purge
-// Scans nbc:review_resolve:* cache keys in Redis and re-adds missing review entries
+// /api/index/resolve-page — resolve one page of library URLs → internal review URLs
+// ?offset=0 → first 5 URLs, ?offset=5 → next 5, etc.
+// Each call does 5 live NBC fetches (~15s), safely under Vercel 30s limit.
+app.get('/api/index/resolve-page', async (req, res) => {
+  const offset = parseInt(req.query.offset as string || '0');
+  try {
+    const result = await resolveLibraryUrlsPage(offset);
+    return res.json({ success: true, ...result });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// /api/index/recover-review-urls — resolve library URLs → internal review URLs
+// ?clearcache=1  wipes all stale nbc:review_resolve:* keys so every library URL
+//               is re-fetched fresh (needed after fixing the -review. bug)
 app.get('/api/index/recover-review-urls', async (req, res) => {
   try {
+    if (req.query.clearcache === '1') {
+      // Wipe all stale resolve cache keys via Upstash SCAN + DEL
+      const axios2 = (await import('axios')).default;
+      const rUrl   = process.env.UPSTASH_REDIS_REST_URL!;
+      const rToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
+      const headers = { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' };
+      let cursor = '0'; let deleted = 0;
+      do {
+        const scan: any = await axios2.post(`${rUrl}/pipeline`,
+          [['SCAN', cursor, 'MATCH', 'nbc:review_resolve:*', 'COUNT', '100']],
+          { headers });
+        const [newCursor, keys] = scan.data[0].result as [string, string[]];
+        cursor = newCursor;
+        if (keys?.length) {
+          await axios2.post(`${rUrl}/pipeline`, keys.map(k => ['DEL', k]), { headers });
+          deleted += keys.length;
+        }
+      } while (cursor !== '0');
+    }
+    if (req.query.norun === '1') return res.json({ success: true, message: 'Cache cleared' });
     const result = await recoverDeletedReviewUrls();
     return res.json({ success: true, ...result,
-      message: `Recovered ${result.recovered} deleted review entries. ${result.alreadyPresent} were already present.`
+      message: `Recovered ${result.recovered} review URLs. ${result.alreadyPresent} already present.`
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
@@ -1618,11 +1653,18 @@ app.get('/recrawl', (_, res) => {
 </div>
 
 <div class="footer-bar">
-  <div>
+  <div style="flex:1">
     <strong>Step 3 — Finish up (run in order)</strong>
-    <p>Resolve library URLs → review URLs, then purge remaining library dupes, then rebuild the search index.</p>
+    <p>For each library phone, opens its page and checks if NBC has an internal review. If found, swaps the URL. Then purge and rebuild.</p>
+    <div style="margin-top:8px">
+      <div class="bar-track" style="background:var(--border)"><div class="bar-fill" style="background:#9b59b6;width:0%" id="barResolve"></div></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;justify-content:space-between">
+        <span id="resolveLabel">idle</span><span id="resolveStats"></span>
+      </div>
+    </div>
   </div>
-  <button class="btn btn-plain" onclick="doResolve()" id="btnResolve">1. Resolve reviews</button>
+  <button class="btn btn-plain" onclick="doResolve()" id="btnResolve">1. Resolve</button>
+  <button class="btn btn-stop" onclick="stopResolve()" id="btnStopResolve" style="display:none">■ Stop</button>
   <button class="btn btn-plain" onclick="doPurge()" id="btnPurge">2. Purge dupes</button>
   <button class="btn btn-plain" onclick="doRebuild()" id="btnRebuild">3. Rebuild index</button>
   <span id="postmsg"></span>
@@ -1808,16 +1850,48 @@ async function startC() {
 
 function stopC() { cStop = true; logLine('logC', 'stop requested…', 'warn'); }
 
+let resolveStop = false;
+function stopResolve() { resolveStop = true; }
+
 async function doResolve() {
+  resolveStop = false;
   const btn = document.getElementById('btnResolve');
   btn.disabled = true;
-  document.getElementById('postmsg').textContent = 'resolving library → review URLs…';
+  document.getElementById('btnStopResolve').style.display = 'inline-flex';
+  document.getElementById('postmsg').textContent = '';
+  let offset = 0, totalResolved = 0, total = 0;
+
+  // First: clear stale resolve caches so we refetch fresh from NBC
+  document.getElementById('resolveLabel').textContent = 'clearing stale cache…';
   try {
-    const r = await fetch('/api/index/recover-review-urls');
-    const d = await r.json();
-    document.getElementById('postmsg').textContent = 'resolved: ' + (d.recovered || 0) + ' new review URLs found';
-  } catch(e) { document.getElementById('postmsg').textContent = 'resolve error: ' + e.message; }
+    await fetch('/api/index/recover-review-urls?clearcache=1&norun=1');
+  } catch(e) {}
+
+  document.getElementById('resolveLabel').textContent = 'resolving…';
+
+  while (!resolveStop) {
+    try {
+      const r = await fetch('/api/index/resolve-page?offset=' + offset);
+      if (!r.ok) { await sleep(2000); continue; }
+      const d = await r.json();
+      if (!d.success) break;
+      totalResolved += d.resolved;
+      total = d.total;
+      offset = d.offset;
+      const pct = total > 0 ? Math.min(Math.round(offset / total * 100), 100) : 0;
+      document.getElementById('barResolve').style.width = pct + '%';
+      document.getElementById('resolveLabel').textContent = offset + ' / ' + total + ' checked';
+      document.getElementById('resolveStats').textContent = totalResolved + ' upgraded to review URL';
+      if (d.done) {
+        document.getElementById('resolveLabel').textContent = 'done — ' + total + ' checked, ' + totalResolved + ' upgraded';
+        break;
+      }
+      await sleep(400);
+    } catch(e) { await sleep(2000); }
+  }
+
   btn.disabled = false;
+  document.getElementById('btnStopResolve').style.display = 'none';
 }
 
 async function doPurge() {

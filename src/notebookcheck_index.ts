@@ -135,48 +135,88 @@ async function rSetNX(k: string, v: string, ttl: number): Promise<boolean> {
 // Looks at all library URLs currently in the index, calls resolveToReviewUrl on each
 // (hits Redis cache instantly — no live fetches needed), and adds the review URL if missing.
 // Much faster than scanning Redis keys — works purely from existing entries + resolve cache.
+// Paginated resolve: process BATCH_SIZE library URLs per call.
+// Each call does live HTTP fetches — must stay under Vercel 30s limit.
+// offset=0 → first batch, offset=N → next batch. Returns done:true when all resolved.
+const RESOLVE_BATCH = 5; // 5 live fetches × ~3s each = ~15s, safely under 30s limit
+
+export async function resolveLibraryUrlsPage(offset: number): Promise<{
+  resolved: number; alreadyReview: number; noReview: number;
+  total: number; offset: number; done: boolean;
+}> {
+  const entries = await loadEntries();
+  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));
+  const total = libraryUrls.length;
+  const batch = libraryUrls.slice(offset, offset + RESOLVE_BATCH);
+  const done = offset + RESOLVE_BATCH >= total;
+
+  let resolved = 0, alreadyReview = 0, noReview = 0;
+  const updates: Record<string, IndexEntry> = {};
+
+  await Promise.all(batch.map(async (libraryUrl) => {
+    try {
+      const reviewUrl = await resolveToReviewUrl(libraryUrl);
+
+      if (!reviewUrl || reviewUrl === libraryUrl) {
+        noReview++;
+        return; // no internal review exists — keep library URL
+      }
+
+      alreadyReview++;
+
+      // If index already has the review URL, nothing to do
+      if (entries[reviewUrl]) return;
+
+      // Add internal review URL, drop library URL
+      const slug = reviewUrl.split('/').pop() || '';
+      const rawTitle = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+      const title = rawTitle.split(' ').map((w: string) =>
+        w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+
+      updates[reviewUrl] = {
+        url: reviewUrl, title,
+        brand: extractBrand(title), slug,
+        discoveredAt: new Date().toISOString(),
+        status: 'pending', retries: 0,
+      };
+      delete entries[libraryUrl]; // drop the library URL
+      resolved++;
+    } catch { noReview++; }
+  }));
+
+  if (resolved > 0) {
+    Object.assign(entries, updates);
+    await saveEntries(entries);
+  }
+
+  return { resolved, alreadyReview, noReview, total, offset: offset + RESOLVE_BATCH, done };
+}
+
+// Legacy full-batch version (kept for compatibility — only safe when resolve cache is warm)
 export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; alreadyPresent: number; totalCacheKeys: number }> {
   const entries = await loadEntries();
-
-  // Find all library URLs still in the index (non-review URLs)
-  const libraryUrls = Object.keys(entries).filter(u => !/-review-/i.test(u));
+  const libraryUrls = Object.keys(entries).filter(u => !/-review[-_.]/i.test(u));
   const totalCacheKeys = libraryUrls.length;
-
   let recovered = 0, alreadyPresent = 0;
 
-  // Resolve in parallel batches of 20 — hits Redis resolve cache, no live HTTP fetches
-  const CONCURRENCY = 20;
-  for (let i = 0; i < libraryUrls.length; i += CONCURRENCY) {
-    const batch = libraryUrls.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < libraryUrls.length; i += 5) {
+    const batch = libraryUrls.slice(i, i + 5);
     await Promise.all(batch.map(async (libraryUrl) => {
       try {
         const reviewUrl = await resolveToReviewUrl(libraryUrl);
-        if (!reviewUrl || reviewUrl === libraryUrl) return; // no review found
-
+        if (!reviewUrl || reviewUrl === libraryUrl) return;
         if (entries[reviewUrl]) { alreadyPresent++; return; }
-
-        // Review URL missing from index — re-add it
-        // Derive clean title from slug: "Samsung-Galaxy-S25-Ultra-review-....0.html" → "Samsung Galaxy S25 Ultra"
         const slug = reviewUrl.split('/').pop() || '';
-        const rawTitle = slug.split('-review-')[0].replace(/-/g, ' ').trim();
+        const rawTitle = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
         const title = rawTitle.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-
-        entries[reviewUrl] = {
-          url: reviewUrl, title,
-          brand: extractBrand(title), slug,
-          discoveredAt: new Date().toISOString(),
-          status: 'pending', retries: 0,
-        };
+        entries[reviewUrl] = { url: reviewUrl, title, brand: extractBrand(title), slug,
+          discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
         recovered++;
-      } catch { /* skip on error */ }
+      } catch { /* skip */ }
     }));
   }
 
-  if (recovered > 0) {
-    await saveEntries(entries);
-    await rebuildSearchIndex();
-  }
-
+  if (recovered > 0) { await saveEntries(entries); await rebuildSearchIndex(); }
   return { recovered, alreadyPresent, totalCacheKeys };
 }
 
@@ -276,9 +316,9 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review-/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
-      reviewUrl = href;
+      if (!isJunkSlug(href.split('/').pop() || '')) reviewUrl = href;
     });
   }
 
@@ -300,13 +340,14 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review-/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
 
       // The review slug must start with the device name words
       const reviewSlug = (href.split('/').pop() || '').toLowerCase();
       const allMatch = matchWords.every(w => reviewSlug.includes(w));
       if (!allMatch) return;
+      if (isJunkSlug(reviewSlug)) return;
 
       reviewUrl = href;
     });
@@ -321,10 +362,10 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
       if (!href.startsWith('https://www.notebookcheck.net')) return;
       href = href.split('?')[0];
-      if (!/-review-/i.test(href)) return;
+      if (!/-review[-_.]/i.test(href)) return;
       if (!/\.\d{4,}\.0\.html$/.test(href)) return;
       const reviewSlug = (href.split('/').pop() || '').toLowerCase();
-      if (reviewSlug.startsWith(librarySlug.slice(0, 10))) {
+      if (reviewSlug.startsWith(librarySlug.slice(0, 10)) && !isJunkSlug(reviewSlug)) {
         reviewUrl = href;
       }
     });
