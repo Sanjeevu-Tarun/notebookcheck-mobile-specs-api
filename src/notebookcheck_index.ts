@@ -796,70 +796,44 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
   const entries = await loadEntries();
   const reasons: Record<string, number> = { hasReviewCounterpart: 0, junkTitle: 0 };
 
-  // For every internal review URL, extract the device name from the slug.
-  // Slug: "Brilliant-Zeiss-camera-Vivo-X300-review-something.123456.0.html"
-  //   → part before "-review-" → "brilliant zeiss camera vivo x300"
-  // But library title is "Vivo X300" — so check if ALL words of the library title
-  // appear in the pre-review slug text. If yes → review covers this device → purge library.
-  //
-  // Also build a simple set of exact library titles stored on review URLs (for the
-  // case where crawlReviewsPage stored a clean title like "Vivo X300" directly).
-  const reviewSlugWords: string[] = [];   // pre-review slug text for each review URL
-  const reviewTitlesExact = new Set<string>(); // exact stored titles on review entries
-
+  // Build a set of exact titles that have an internal review URL.
+  // Only genuine review URLs (not junk comparisons/camera-tests) contribute.
+  // Matching is exact title == exact title (case-insensitive).
+  // This is the ONLY safe way — substring/slug matching causes false positives
+  // e.g. "fe" substring matches "perfectly", purging Vivo X300 FE when only X300 has a review.
+  const reviewTitles = new Set<string>();
   for (const [url, e] of Object.entries(entries)) {
     if (!/-review[-_.]/i.test(url)) continue;
-    const slug = url.split('/').pop() || '';
-    // Skip junk review URLs (comparisons, camera tests, etc.) — their slug text
-    // contains device names that would falsely match unrelated library entries.
-    // e.g. "Showdown-...-Vivo-X300-Pro-...-photo-comparison-review" would match
-    // library title "Vivo X300 Pro" and incorrectly purge it.
-    if (isJunkSlug(slug)) continue;
-    reviewTitlesExact.add(e.title.toLowerCase().trim());
-    const prePart = slug.toLowerCase().split(/-review[-_.]/i)[0].replace(/-/g, ' ');
-    reviewSlugWords.push(prePart);
+    if (isJunkSlug(url.split('/').pop() || '')) continue;
+    reviewTitles.add(e.title.toLowerCase().trim());
   }
 
   const toDelete: string[] = [];
   for (const [url, e] of Object.entries(entries)) {
-
     const slug = url.split('/').pop() || '';
 
-    // Rule 0: junk review URL — comparison/camera-test/hands-on that slipped through crawl filter.
-    // These have "-review-" in the slug but are NOT full device reviews.
-    // Safe to delete regardless of whether a counterpart exists.
+    // Rule 0: junk article that slipped through crawl (comparison, camera test, etc.)
     if (isJunkSlug(slug)) {
       toDelete.push(url);
       reasons.junkTitle++;
       continue;
     }
 
-    // Never touch genuine internal review URLs
+    // Never delete genuine internal review URLs
     if (/-review[-_.]/i.test(url)) continue;
 
-    // Rule 1: junk title (article snippet, not a clean device name)
+    // Rule 1: junk title (article snippet — too long to be a clean device name)
     if (e.title.length > 80) {
       toDelete.push(url);
       reasons.junkTitle++;
       continue;
     }
 
-    const libTitle = e.title.toLowerCase().trim();
-    const libWords = libTitle.split(/\s+/).filter((w: string) => w.length > 1);
-
-    // Rule 2: exact title match with a review entry title
-    if (reviewTitlesExact.has(libTitle)) {
-      toDelete.push(url);
-      reasons.hasReviewCounterpart++;
-      continue;
-    }
-
-    // Rule 3: all words of the library title appear in a review slug's pre-review text
-    // e.g. library "Vivo X300" → ["vivo","x300"] all in "brilliant zeiss camera vivo x300" → match
-    const coveredByReview = reviewSlugWords.some((slugText: string) =>
-      libWords.every((w: string) => slugText.includes(w))
-    );
-    if (coveredByReview) {
+    // Rule 2: an internal review exists with the EXACT same title → library URL is redundant.
+    // "Vivo X300" library purged only if a review entry also has title "Vivo X300".
+    // "Vivo X300 FE" is safe — no review with that exact title exists.
+    // "Vivo X300 Pro" is safe — no review with that exact title exists (until one is crawled).
+    if (reviewTitles.has(e.title.toLowerCase().trim())) {
       toDelete.push(url);
       reasons.hasReviewCounterpart++;
     }
