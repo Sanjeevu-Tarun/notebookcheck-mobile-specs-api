@@ -364,6 +364,38 @@ function extractBrand(title: string): string {
 
 // ── URL EXTRACTOR ─────────────────────────────────────────────────────────────
 
+// ── JUNK SLUG FILTER ─────────────────────────────────────────────────────────
+// Rejects NBC article URLs that are NOT full device reviews:
+//   - Comparison articles  e.g. "Honor-Magic8-Pro-vs-Vivo-X300-Pro-photo-comparison"
+//   - Camera-only tests    e.g. "Vivo-X300-Pro-camera-test-in-Cyprus"
+//   - Hands-on / first-look / unboxing / teardown
+//   - Announced / leaked / rumour posts
+//   - Camera reviews (not full device review)
+//   - Award/best-of roundups
+// Applied at crawl time (all three sources) and at purge time (clean up existing junk).
+function isJunkSlug(slug: string): boolean {
+  const s = slug.toLowerCase();
+  return (
+    /(-|)vs(-|)/.test(s)            ||  // comparison: "Honor-X-vs-Vivo-Y"
+    /photo.?comparison/.test(s)          ||  // photo comparison articles
+    /camera.?test/.test(s)               ||  // camera test articles
+    /camera.?review/.test(s)             ||  // camera-only review
+    /hands?.?on/.test(s)                 ||  // hands-on articles
+    /first.?look/.test(s)                ||
+    /unboxing/.test(s)                   ||
+    /teardown/.test(s)                   ||
+    /announced/.test(s)                  ||
+    /unveiled/.test(s)                   ||
+    /leaked/.test(s)                     ||
+    /rumou?r/.test(s)                    ||
+    /price.?drop/.test(s)                ||
+    /best.?of/.test(s)                   ||
+    /roundup/.test(s)                    ||
+    /part-[0-9]/.test(s)                 ||  // "camera-test-in-Cyprus-Part-1"
+    /showdown/.test(s)                       // "Showdown in London"
+  );
+}
+
 export function extractPhoneUrls(html: string): Array<{ url: string; title: string }> {
   const $ = cheerio.load(html);
   const out: Array<{ url: string; title: string }> = [];
@@ -381,6 +413,7 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
     const slug = href.split('/').pop() || '';
     if (/^(Reviews|Smartphones|Search|Topics|RSS|index|Notebooks|News|Smartphone|Library|Comparison|Chronological)\./i.test(slug)) return;
     if (/-Series\./i.test(slug)) return;
+    if (isJunkSlug(slug)) return;
 
     // The Chronological page labels each entry type in the parent element text.
     // Keep only "(Smartphone)" entries — tablets, notebooks, gaming etc. are skipped.
@@ -440,9 +473,10 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
     href = href.split('?')[0];
     if (!href.includes('notebookcheck.net')) return;
-    if (!/-review-/i.test(href)) return;          // SOURCE A: review URLs only
+    if (!/-review[-_.]/i.test(href)) return;      // SOURCE A: review URLs only (-review- or -review.)
     if (!/\.\d{4,}\.0\.html$/.test(href)) return;
     if (seen.has(href.toLowerCase())) return;
+    if (isJunkSlug(href.split('/').pop() || '')) return; // skip comparisons, camera tests, etc.
     seen.add(href.toLowerCase());
 
     const title = ($(el).attr('title') || $(el).text().trim() || '')
@@ -507,9 +541,9 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
   // Build review prefix set — skip devices already covered by a review URL
   const reviewPrefixes = new Set<string>();
   for (const u of Object.keys(entries)) {
-    if (/-review-/i.test(u)) {
+    if (/-review[-_.]/i.test(u)) {
       const slug = u.split('/').pop() || '';
-      reviewPrefixes.add(slug.toLowerCase().split('-review-')[0]);
+      reviewPrefixes.add(slug.toLowerCase().split(/-review[-_.]/i)[0]);
     }
   }
 
@@ -560,9 +594,9 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
   // Build review prefix set — skip devices already covered by a review URL
   const reviewPrefixes = new Set<string>();
   for (const u of Object.keys(entries)) {
-    if (/-review-/i.test(u)) {
+    if (/-review[-_.]/i.test(u)) {
       const slug = u.split('/').pop() || '';
-      reviewPrefixes.add(slug.toLowerCase().split('-review-')[0]);
+      reviewPrefixes.add(slug.toLowerCase().split(/-review[-_.]/i)[0]);
     }
   }
 
@@ -772,7 +806,7 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
   const reviewTitlesExact = new Set<string>(); // exact stored titles on review entries
 
   for (const [url, e] of Object.entries(entries)) {
-    if (!/-review-/i.test(url)) continue;
+    if (!/-review[-_.]/i.test(url)) continue;
     reviewTitlesExact.add(e.title.toLowerCase().trim());
     const slug = url.split('/').pop() || '';
     const prePart = slug.toLowerCase().split('-review-')[0].replace(/-/g, ' ');
@@ -781,9 +815,22 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
 
   const toDelete: string[] = [];
   for (const [url, e] of Object.entries(entries)) {
-    if (/-review-/i.test(url)) continue;
 
-    // Rule 1: junk title
+    const slug = url.split('/').pop() || '';
+
+    // Rule 0: junk review URL — comparison/camera-test/hands-on that slipped through crawl filter.
+    // These have "-review-" in the slug but are NOT full device reviews.
+    // Safe to delete regardless of whether a counterpart exists.
+    if (isJunkSlug(slug)) {
+      toDelete.push(url);
+      reasons.junkTitle++;
+      continue;
+    }
+
+    // Never touch genuine internal review URLs
+    if (/-review[-_.]/i.test(url)) continue;
+
+    // Rule 1: junk title (article snippet, not a clean device name)
     if (e.title.length > 80) {
       toDelete.push(url);
       reasons.junkTitle++;
@@ -791,7 +838,7 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
     }
 
     const libTitle = e.title.toLowerCase().trim();
-    const libWords = libTitle.split(/\s+/).filter(w => w.length > 1);
+    const libWords = libTitle.split(/\s+/).filter((w: string) => w.length > 1);
 
     // Rule 2: exact title match with a review entry title
     if (reviewTitlesExact.has(libTitle)) {
@@ -801,10 +848,9 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
     }
 
     // Rule 3: all words of the library title appear in a review slug's pre-review text
-    // e.g. library title "Vivo X300" → words ["vivo","x300"]
-    // review slug pre-part "brilliant zeiss camera vivo x300" → contains both → match
-    const coveredByReview = reviewSlugWords.some(slugText =>
-      libWords.every(w => slugText.includes(w))
+    // e.g. library "Vivo X300" → ["vivo","x300"] all in "brilliant zeiss camera vivo x300" → match
+    const coveredByReview = reviewSlugWords.some((slugText: string) =>
+      libWords.every((w: string) => slugText.includes(w))
     );
     if (coveredByReview) {
       toDelete.push(url);
