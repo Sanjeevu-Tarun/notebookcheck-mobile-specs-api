@@ -924,6 +924,28 @@ app.get('/api/index/resolve-url', async (req, res) => {
   }
 });
 
+// /api/index/resolve-one — force-resolve a single library URL (bypasses cache)
+// ?url=https://www.notebookcheck.net/Vivo-X300-Pro.1178848.0.html
+app.get('/api/index/resolve-one', async (req, res) => {
+  const url = req.query.url as string;
+  if (!url) return res.status(400).json({ success: false, error: '"url" required' });
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl2  = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken2 = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    const headers = { Authorization: `Bearer ${rToken2}`, 'Content-Type': 'application/json' };
+    // Wipe cache for this URL
+    const ck = `nbc:review_resolve:${url}`;
+    await axios2.post(`${rUrl2}/pipeline`, [['DEL', ck]], { headers });
+    // Now resolve fresh
+    const { resolveToReviewUrl } = await import('./src/notebookcheck_index') as any;
+    const resolved = await resolveToReviewUrl(url);
+    return res.json({ success: true, input: url, resolved, isReviewUrl: /-review[-_.]/i.test(resolved), changed: resolved !== url });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // /api/index/resolve-page — resolve one page of library URLs → internal review URLs
 // ?offset=0 → first 5 URLs, ?offset=5 → next 5, etc.
 // Each call does 5 live NBC fetches (~15s), safely under Vercel 30s limit.

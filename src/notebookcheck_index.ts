@@ -155,6 +155,10 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
 
   await Promise.all(batch.map(async (libraryUrl) => {
     try {
+      // Always delete the stale cache key before resolving.
+      // The old broken -review- regex may have cached "no review" — nuke it so we refetch fresh.
+      const ck = `nbc:review_resolve:${libraryUrl}`;
+      await rDel(ck);
       const reviewUrl = await resolveToReviewUrl(libraryUrl);
 
       if (!reviewUrl || reviewUrl === libraryUrl) {
