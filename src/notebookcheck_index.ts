@@ -809,9 +809,14 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
 
   for (const [url, e] of Object.entries(entries)) {
     if (!/-review[-_.]/i.test(url)) continue;
-    reviewTitlesExact.add(e.title.toLowerCase().trim());
     const slug = url.split('/').pop() || '';
-    const prePart = slug.toLowerCase().split('-review-')[0].replace(/-/g, ' ');
+    // Skip junk review URLs (comparisons, camera tests, etc.) — their slug text
+    // contains device names that would falsely match unrelated library entries.
+    // e.g. "Showdown-...-Vivo-X300-Pro-...-photo-comparison-review" would match
+    // library title "Vivo X300 Pro" and incorrectly purge it.
+    if (isJunkSlug(slug)) continue;
+    reviewTitlesExact.add(e.title.toLowerCase().trim());
+    const prePart = slug.toLowerCase().split(/-review[-_.]/i)[0].replace(/-/g, ' ');
     reviewSlugWords.push(prePart);
   }
 
