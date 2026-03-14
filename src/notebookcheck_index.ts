@@ -51,6 +51,7 @@ export interface IndexEntry {
   url: string; title: string; brand: string; slug: string;
   discoveredAt: string; status: ScrapeStatus;
   scrapedAt?: string; errorMsg?: string; retries: number;
+  source?: 'review' | 'library'; // 'review' = from Source A (internal NBC review), 'library' = external
 }
 
 export interface CrawlStats {
@@ -197,7 +198,7 @@ export async function resolveLibraryUrlsPage(offset: number): Promise<{
         url: reviewUrl, title,
         brand: extractBrand(title), slug,
         discoveredAt: new Date().toISOString(),
-        status: 'pending', retries: 0,
+        status: 'pending', retries: 0, source: 'review',
       };
       delete entries[libraryUrl]; // drop the library URL
       resolved++;
@@ -432,6 +433,18 @@ function extractBrand(title: string): string {
 
 // ── URL EXTRACTOR ─────────────────────────────────────────────────────────────
 
+// Library URLs are short device-name slugs: "Samsung-Galaxy-S25-Ultra.975474.0.html"
+// Review URLs are descriptive article slugs: "Can-the-Redmi-Note-15-5G-win-everyone-over.1237258.0.html"
+// This distinction is URL-pattern based and works even without the source field.
+const LIBRARY_STOP_WORDS = /^(the|a|an|is|in|for|with|of|to|and|but|or|can|win|over|more|than|just|most|best|why|how|what|when|does|this|that|its|new|all|vs|review|test|smartphone|by|from|at|on|be|are|was|has|have|not|no|if|as|up|do|go)$/i;
+
+function isLibraryUrl(url: string): boolean {
+  const slug = (url.split('/').pop() || '').replace(/\.\d+\.0\.html$/, '');
+  const words = slug.split('-').filter(w => w.length > 0);
+  // Library slugs: ≤6 words, no stop/article/verb words
+  return words.length <= 6 && !words.some(w => LIBRARY_STOP_WORDS.test(w));
+}
+
 // ── JUNK SLUG FILTER ─────────────────────────────────────────────────────────
 // Rejects NBC article URLs that are NOT full device reviews:
 //   - Comparison articles  e.g. "Honor-Magic8-Pro-vs-Vivo-X300-Pro-photo-comparison"
@@ -468,19 +481,25 @@ function isJunkSlug(slug: string): boolean {
 // For descriptive article titles like "More than just an unusual camera setup – Vivo X300 Pro review"
 // we prefer the part after a separator (–, :, |) if it looks like a device name.
 // Fallback: last 4 words of the pre-review slug.
+// Noise words that appear in review titles but are not part of device names
+const TITLE_NOISE = /\b(smartphone|smartphones|mobile|phone|phones|handset|tablet|device|review|test|verdict|hands.on)\b/gi;
+
 function extractDeviceTitle(linkText: string, url: string): string {
   // Try: split on — – | : and take the last segment that looks like a device name
   const parts = linkText.split(/\s*[–—|:]\s*/);
   for (let i = parts.length - 1; i >= 0; i--) {
-    const part = parts[i].replace(/\breview\b/gi, '').replace(/\s+/g, ' ').trim();
+    const part = parts[i]
+      .replace(TITLE_NOISE, '')
+      .replace(/\s+/g, ' ').trim();
     if (part.length > 3 && part.length < 50 && !/\b(the|a|an|is|in|for|with|of|to)\b/i.test(part)) {
       return part;
     }
   }
-  // Fallback: extract from slug — last 4 words before "-review"
+  // Fallback: last 4 meaningful words from pre-review slug
   const slug = url.split('/').pop() || '';
   const pre = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
-  const words = pre.split(' ').filter(w => w.length > 1);
+  const words = pre.split(' ').filter(w => w.length > 1 && !TITLE_NOISE.test(w));
+  TITLE_NOISE.lastIndex = 0; // reset regex state
   return words.slice(-4).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || linkText.slice(0, 50);
 }
 
@@ -541,9 +560,9 @@ export interface CrawlPageResult {
   source: 'reviews' | 'chrono';
 }
 
-function makeEntry(url: string, title: string): IndexEntry {
+function makeEntry(url: string, title: string, source: 'review' | 'library' = 'library'): IndexEntry {
   return { url, title, brand: extractBrand(title), slug: url.split('/').pop() || '',
-    discoveredAt: new Date().toISOString(), status: 'pending', retries: 0 };
+    discoveredAt: new Date().toISOString(), status: 'pending', retries: 0, source };
 }
 
 // ── SOURCE A: NBC Smartphones reviews listing ─────────────────────────────────
@@ -583,7 +602,7 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   const entries = await loadEntries();
   let newUrls = 0;
   for (const { url: u, title } of found) {
-    if (!entries[u]) { entries[u] = makeEntry(u, title); newUrls++; }
+    if (!entries[u]) { entries[u] = makeEntry(u, title, 'review'); newUrls++; }
   }
   if (newUrls > 0) await saveEntries(entries);
 
