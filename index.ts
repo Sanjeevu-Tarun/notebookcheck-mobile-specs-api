@@ -1815,7 +1815,7 @@ async function doResolve() {
   try {
     const r = await fetch('/api/index/recover-review-urls');
     const d = await r.json();
-    document.getElementById('postmsg').textContent = `resolved: ${d.recovered || 0} new review URLs found`;
+    document.getElementById('postmsg').textContent = 'resolved: ' + (d.recovered || 0) + ' new review URLs found';
   } catch(e) { document.getElementById('postmsg').textContent = 'resolve error: ' + e.message; }
   btn.disabled = false;
 }
@@ -1959,7 +1959,7 @@ app.get('/api/index/search-debug', async (req, res) => {
   }
 });
 
-// /api/index/rebuild-search — rebuild the fast search index from entriess
+// /api/index/rebuild-search — rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {
     await rebuildSearchIndex();
