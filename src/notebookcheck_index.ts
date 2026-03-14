@@ -758,40 +758,57 @@ export async function rebuildSearchIndex(): Promise<void> {
 // Safe to run multiple times. Rebuilds search index on completion.
 export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: number; reasons: Record<string, number> }> {
   const entries = await loadEntries();
-  const reasons: Record<string, number> = { junkTitle: 0, libraryDuplicate: 0 };
+  const reasons: Record<string, number> = { hasReviewCounterpart: 0, junkTitle: 0 };
 
-  // Build a set of device slug prefixes that have a review URL
-  // e.g. "samsung-galaxy-s25-ultra" from "Samsung-Galaxy-S25-Ultra-review-...968346.0.html"
-  const reviewPrefixes = new Set<string>();
-  for (const url of Object.keys(entries)) {
+  // For every internal review URL, extract the device name from the slug.
+  // Slug: "Brilliant-Zeiss-camera-Vivo-X300-review-something.123456.0.html"
+  //   → part before "-review-" → "brilliant zeiss camera vivo x300"
+  // But library title is "Vivo X300" — so check if ALL words of the library title
+  // appear in the pre-review slug text. If yes → review covers this device → purge library.
+  //
+  // Also build a simple set of exact library titles stored on review URLs (for the
+  // case where crawlReviewsPage stored a clean title like "Vivo X300" directly).
+  const reviewSlugWords: string[] = [];   // pre-review slug text for each review URL
+  const reviewTitlesExact = new Set<string>(); // exact stored titles on review entries
+
+  for (const [url, e] of Object.entries(entries)) {
     if (!/-review-/i.test(url)) continue;
+    reviewTitlesExact.add(e.title.toLowerCase().trim());
     const slug = url.split('/').pop() || '';
-    // Device prefix = everything before "-review-"
-    const prefix = slug.toLowerCase().split('-review-')[0];
-    if (prefix.length > 3) reviewPrefixes.add(prefix);
+    const prePart = slug.toLowerCase().split('-review-')[0].replace(/-/g, ' ');
+    reviewSlugWords.push(prePart);
   }
 
   const toDelete: string[] = [];
   for (const [url, e] of Object.entries(entries)) {
-    // Only touch non-review URLs — NEVER delete internal review entries
     if (/-review-/i.test(url)) continue;
 
-    // 1. Junk title — library entries with article snippet titles (>80 chars)
-    //    e.g. "86% Smartphone with superlatives has its eye on the prize - Realme GT 7 Pro review..."
+    // Rule 1: junk title
     if (e.title.length > 80) {
       toDelete.push(url);
       reasons.junkTitle++;
       continue;
     }
 
-    // 2. Library duplicate — library URL whose slug prefix matches a review entry
-    //    e.g. "Samsung-Galaxy-S25-Ultra.975474.0.html" → prefix "samsung-galaxy-s25-ultra"
-    //    matches review "Samsung-Galaxy-S25-Ultra-review-....968346.0.html"
-    const slug = url.split('/').pop() || '';
-    const prefix = slug.toLowerCase().replace(/\.\d+\.0\.html$/, '');
-    if (reviewPrefixes.has(prefix)) {
+    const libTitle = e.title.toLowerCase().trim();
+    const libWords = libTitle.split(/\s+/).filter(w => w.length > 1);
+
+    // Rule 2: exact title match with a review entry title
+    if (reviewTitlesExact.has(libTitle)) {
       toDelete.push(url);
-      reasons.libraryDuplicate++;
+      reasons.hasReviewCounterpart++;
+      continue;
+    }
+
+    // Rule 3: all words of the library title appear in a review slug's pre-review text
+    // e.g. library title "Vivo X300" → words ["vivo","x300"]
+    // review slug pre-part "brilliant zeiss camera vivo x300" → contains both → match
+    const coveredByReview = reviewSlugWords.some(slugText =>
+      libWords.every(w => slugText.includes(w))
+    );
+    if (coveredByReview) {
+      toDelete.push(url);
+      reasons.hasReviewCounterpart++;
     }
   }
 
