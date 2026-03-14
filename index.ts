@@ -1959,6 +1959,41 @@ app.get('/api/index/search-debug', async (req, res) => {
   }
 });
 
+// /api/index/clean-titles — fix dirty titles already stored in Redis
+// Strips subtitle after |, —, –, : and removes "review" from stored titles.
+// Run once after deploying this fix.
+app.get('/api/index/clean-titles', async (req, res) => {
+  try {
+    const axios2 = (await import('axios')).default;
+    const rUrl   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    const headers = { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' };
+    const raw = await axios2.get(`${rUrl}/get/nbc:index:v3:entries`, { headers });
+    const entries = raw.data?.result ? JSON.parse(raw.data.result) : {};
+    let cleaned = 0;
+    for (const e of Object.values(entries) as any[]) {
+      const orig = e.title as string;
+      const fixed = orig
+        .split(/\s*[|—–:]\s*/)[0]
+        .split(' - ')[0]
+        .replace(/reviews?/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (fixed !== orig && fixed.length >= 4) { e.title = fixed; cleaned++; }
+    }
+    if (cleaned > 0) {
+      await axios2.post(`${rUrl}/pipeline`,
+        [['SET', 'nbc:index:v3:entries', JSON.stringify(entries)]],
+        { headers });
+      const { rebuildSearchIndex } = await import('./src/notebookcheck_index');
+      await rebuildSearchIndex();
+    }
+    return res.json({ success: true, cleaned, message: `Fixed ${cleaned} dirty titles and rebuilt search index` });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // /api/index/rebuild-search — rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {

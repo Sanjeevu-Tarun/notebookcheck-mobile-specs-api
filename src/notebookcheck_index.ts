@@ -484,7 +484,7 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
 
     const title = ($(el).attr('title') || $(el).text().trim() || '')
       .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    const cleanTitle = title.split(' - ')[0].replace(/\breview\b/gi, '').replace(/\s+/g, ' ').trim();
+    const cleanTitle = title.split(/\s*[|—–:]\s*/)[0].split(' - ')[0].replace(/\breviews?\b/gi, '').replace(/\s+/g, ' ').trim();
     if (cleanTitle.length < 4) return;
     found.push({ url: href, title: cleanTitle });
   });
@@ -530,7 +530,7 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
 
     const title = ($(el).attr('title') || $(el).text().trim() || '')
       .replace(/^\d+%\s*/, '').replace(/\s+/g, ' ').trim().slice(0, 120);
-    const cleanTitle = title.split(' - ')[0].split(' review')[0].trim();
+    const cleanTitle = title.split(/\s*[|—–:]\s*/)[0].split(' - ')[0].replace(/\breviews?\b/gi, '').replace(/\s+/g, ' ').trim();
     if (cleanTitle.length < 4) return;
     found.push({ url: href, title: cleanTitle });
   });
@@ -919,7 +919,7 @@ function scoreIndexMatch(entryTitle: string, query: string): number {
   if (d.includes(q)) return 8000;
 
   // Penalise extra variant words in title that query didn't include
-  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go', 'slim', 'zoom', 'compact'];
+  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go'];
   let penalty = 0;
   for (const v of variants) {
     if (wordIn(v, d) && !wordIn(v, q)) penalty += 2000;
@@ -962,7 +962,7 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   const VARIANTS = new Set([
     'ultra','pro','plus','mini','lite','fe','max','edge',
     'standard','turbo','fold','flip','xl','xr','se',
-    '5g','4g','go','slim','zoom','compact',
+    '5g','4g','go',
   ]);
 
   const candidates: Array<{ url: string; title: string; titleLen: number }> = [];
