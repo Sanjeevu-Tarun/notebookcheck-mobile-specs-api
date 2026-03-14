@@ -613,22 +613,32 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
     toResolve.push({ url: u, title });
   }
 
+  // Batch-fetch resolve cache for all new library URLs in one pipeline call
+  const libToResolve = toResolve.filter(({ url: u }) => !/-review[-_.]/i.test(u));
+  let resolveMapC: Record<string, string> = {};
+  if (libToResolve.length > 0) {
+    try {
+      const { url: rUrl, token: rToken } = rBase();
+      const pipeline = libToResolve.map(({ url: u }) => ['GET', `nbc:review_resolve:${u}`]);
+      const resp = await _rax.post(`${rUrl}/pipeline`, pipeline,
+        { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' } });
+      resp.data.forEach((item: any, i: number) => {
+        if (item.result) resolveMapC[libToResolve[i].url] = item.result;
+      });
+    } catch { /* cache miss */ }
+  }
+
   let newUrls = 0;
   for (const { url: u, title } of toResolve) {
     if (entries[u]) continue;
     let finalUrl = u;
     let finalTitle = title;
-    if (!/-review[-_.]/i.test(u)) {
-      try {
-        const ck = `nbc:review_resolve:${u}`;
-        const cached = await rGet(ck) as string;
-        if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
-          finalUrl = cached;
-          const slug = cached.split('/').pop() || '';
-          const raw = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
-          finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-        }
-      } catch { /* cache miss */ }
+    const cached = resolveMapC[u];
+    if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
+      finalUrl = cached;
+      const slug = cached.split('/').pop() || '';
+      const raw = slug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+      finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
     }
     if (entries[finalUrl]) continue;
     entries[finalUrl] = makeEntry(finalUrl, finalTitle);
@@ -662,9 +672,8 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
 
   const entries = await loadEntries();
 
-  // Build a set of clean device titles that already have an internal review in the index.
-  // Used to skip library URLs whose device is already covered.
-  // Title-based matching is safe — "Vivo X300 Pro" only matches "Vivo X300 Pro", never "Vivo X300".
+  // Titles of devices that already have an internal review in the index.
+  // Stops library URLs from being added when the review already exists.
   const reviewedTitles = new Set<string>();
   for (const [u, e] of Object.entries(entries)) {
     if (/-review[-_.]/i.test(u) && !isJunkSlug(u.split('/').pop() || '')) {
@@ -672,30 +681,42 @@ export async function crawlChronoPage(page: number): Promise<CrawlPageResult> {
     }
   }
 
-  let newUrls = 0;
-  for (const { url: u, title } of found) {
-    // Already in index — skip
-    if (entries[u]) continue;
+  // Batch-fetch resolve cache for all NEW library URLs in one pipeline call.
+  // This avoids N sequential Redis calls (one per URL) which would timeout on large pages.
+  const newFound = found.filter(({ url: u }) => !entries[u]);
+  const libraryOnly = newFound.filter(({ url: u }) => !/-review[-_.]/i.test(u));
+  let resolveMap: Record<string, string> = {};
+  if (libraryOnly.length > 0) {
+    try {
+      const { url: rUrl, token: rToken } = rBase();
+      const pipeline = libraryOnly.map(({ url: u }) =>
+        ['GET', `nbc:review_resolve:${u}`]
+      );
+      const resp = await _rax.post(`${rUrl}/pipeline`, pipeline,
+        { headers: { Authorization: `Bearer ${rToken}`, 'Content-Type': 'application/json' } }
+      );
+      resp.data.forEach((item: any, i: number) => {
+        if (item.result) resolveMap[libraryOnly[i].url] = item.result;
+      });
+    } catch { /* cache miss — resolveMap stays empty, use library URLs as-is */ }
+  }
 
-    // If a review already exists with the same title, don't add the library URL
+  let newUrls = 0;
+  for (const { url: u, title } of newFound) {
+    // Skip if review exists with same title
     if (reviewedTitles.has(title.toLowerCase().trim())) continue;
 
-    // Check Redis resolve cache (warm after a resolve step — instant, no HTTP).
-    // If this library URL was previously resolved to a review URL, use that directly.
+    // Use cached review URL if available
     let finalUrl = u;
     let finalTitle = title;
-    try {
-      const ck = `nbc:review_resolve:${u}`;
-      const cached = await rGet(ck) as string;
-      if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
-        finalUrl = cached;
-        const rSlug = cached.split('/').pop() || '';
-        const raw = rSlug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
-        finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-      }
-    } catch { /* cache miss — store library URL as fallback */ }
+    const cached = resolveMap[u];
+    if (cached && cached !== u && /-review[-_.]/i.test(cached)) {
+      finalUrl = cached;
+      const rSlug = cached.split('/').pop() || '';
+      const raw = rSlug.split(/-review[-_.]/i)[0].replace(/-/g, ' ').trim();
+      finalTitle = raw.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    }
 
-    // If the resolved review URL is already in the index, skip entirely
     if (entries[finalUrl]) continue;
 
     entries[finalUrl] = makeEntry(finalUrl, finalTitle);
