@@ -45,7 +45,7 @@ import {
 const app = express();
 app.use(cors());
 
-app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v6-SEQUENTIAL-INDEX' }));
+app.get('/api/health', (_, res) => res.json({ status: 'ok', version: 'FIX-v7-RESOLVE' }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // /api/phone — NotebookCheck ONLY (fast version, no GSMArena)
@@ -972,7 +972,7 @@ app.get('/api/index/swap-all', async (req, res) => {
           url: reviewUrl, title,
           brand: entries[libUrl]?.brand || '',
           slug, discoveredAt: new Date().toISOString(),
-          status: 'pending', retries: 0,
+          status: 'pending', retries: 0, source: 'review',
         };
       }
 
@@ -1025,7 +1025,7 @@ app.get('/api/index/swap-url', async (req, res) => {
       url: toUrl, title,
       brand: entries[fromUrl].brand,
       slug, discoveredAt: new Date().toISOString(),
-      status: 'pending', retries: 0,
+      status: 'pending', retries: 0, source: 'review',
     };
 
     // Remove library URL
@@ -2209,6 +2209,8 @@ app.get('/api/index/clean-titles', async (req, res) => {
         .replace(/reviews?/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
+      // Also strip noise words like "smartphone" from device titles
+      fixed = fixed.replace(/\b(smartphone|smartphones|mobile phone|handset)\b/gi, '').replace(/\s+/g, ' ').trim();
       if (fixed !== orig && fixed.length >= 4) { e.title = fixed; cleaned++; }
     }
     if (cleaned > 0) {
