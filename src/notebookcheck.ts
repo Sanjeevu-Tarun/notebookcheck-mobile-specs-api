@@ -958,16 +958,33 @@ export function resolveSearchResult(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SEARCH — SearXNG only
+// SEARCH — Redis index first, SearXNG fallback
 // ─────────────────────────────────────────────────────────────────────────────
 async function searchNBC(query: string): Promise<{ name: string; url: string } | null> {
   const ck = `nbc:search:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, results] = await Promise.all([
-    getCacheAs<{ name: string; url: string }>(ck),
-    searchViaSearXNG(nq, oq),
-  ]);
+
+  // 1. Check result cache (fast — avoids re-searching on repeated queries)
+  const cached = await getCacheAs<{ name: string; url: string }>(ck);
   if (cached) return cached;
+
+  // 2. Try the Redis index first — built from crawled NBC pages.
+  //    If found, cache and return immediately. No SearXNG round-trip needed.
+  try {
+    const { searchIndex } = await import('./notebookcheck_index');
+    const indexHit = await searchIndex(query);
+    if (indexHit) {
+      log('info', 'search.index_hit', { query, url: indexHit.url });
+      await setCache(ck, indexHit);
+      return indexHit;
+    }
+  } catch (e: any) {
+    log('warn', 'search.index_error', { query, error: e?.message });
+    // fall through to SearXNG
+  }
+
+  // 3. SearXNG fallback — fires only when the index has no match
+  const results = await searchViaSearXNG(nq, oq);
   if (!results.length) return null;
   return resolveSearchResult(results, nq, oq, ck);
 }
@@ -2989,28 +3006,38 @@ export async function getNotebookCheckData(query: string): Promise<NBCDeviceData
 export async function getNotebookCheckDataFast(query: string): Promise<NBCDeviceData | NBCError | null> {
   const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
   const t0 = Date.now();
-
-  // PERF: fire full-result cache check and SearXNG search in parallel.
-  // On a cache miss the search has already been running while Redis was checked.
   const oq = query.trim(), nq = normalizeQuery(query);
-  const [cached, searchResults] = await Promise.all([
-    getCacheAs<NBCDeviceData | NBCError>(ck),
-    searchViaSearXNG(nq, oq),
-  ]);
+
+  // 1. Full-result cache hit
+  const cached = await getCacheAs<NBCDeviceData | NBCError>(ck);
   if (cached) { log('info', 'cache.hit', { query, elapsedMs: Date.now() - t0 }); return cached; }
 
-  log('info', 'stage.search', { query, ms: Date.now() - t0, count: searchResults.length });
-  if (!searchResults.length) return null;
+  // 2. Redis index lookup — uses the crawled NBC index, instant, no HTTP
+  let page: { name: string; url: string } | null = null;
+  try {
+    const { searchIndex } = await import('./notebookcheck_index');
+    const indexHit = await searchIndex(query);
+    if (indexHit) {
+      page = indexHit;
+      log('info', 'stage.index_hit', { query, ms: Date.now() - t0, url: page.url });
+    }
+  } catch (e: any) {
+    log('warn', 'stage.index_error', { query, error: e?.message });
+  }
+
+  // 3. SearXNG fallback — only if index had no match
+  if (!page) {
+    const searchResults = await searchViaSearXNG(nq, oq);
+    log('info', 'stage.searxng', { query, ms: Date.now() - t0, count: searchResults.length });
+    if (!searchResults.length) return null;
+    const searchCk = `nbc:search:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
+    page = resolveSearchResult(searchResults, nq, oq, searchCk);
+  }
 
   try {
-    const searchCk = `nbc:search:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
-    const page = resolveSearchResult(searchResults, nq, oq, searchCk);
-
-    // scrapeNotebookCheckDevice owns its own device-level cache — no double lookup here
     const tp = Date.now();
     const details = await scrapeNotebookCheckDevice(page.url, page.name);
     log('info', 'stage.scrape', { query, ms: Date.now() - tp, url: page.url });
-
     const result: NBCDeviceData = { ...details, pageFound: { name: page.name, url: page.url }, reviewUrl: page.url };
     log('info', 'stage.total', { query, ms: Date.now() - t0 });
     setCache(ck, result); return result;
