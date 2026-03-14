@@ -1815,8 +1815,7 @@ async function doResolve() {
   try {
     const r = await fetch('/api/index/recover-review-urls');
     const d = await r.json();
-    // FIXED
-document.getElementById('postmsg').textContent = \`resolved: \${d.recovered || 0} new review URLs found\`;
+    document.getElementById('postmsg').textContent = `resolved: ${d.recovered || 0} new review URLs found`;
   } catch(e) { document.getElementById('postmsg').textContent = 'resolve error: ' + e.message; }
   btn.disabled = false;
 }
@@ -1929,6 +1928,35 @@ app.get('/crawler', (_, res) => {
 </script>
 </body>
 </html>`);
+});
+
+// /api/index/search-debug — check if a query hits the index
+// ?q=vivo+x300  → shows what searchIndex returns (or null if miss)
+// Also shows flat index size so you know if rebuild has been run.
+app.get('/api/index/search-debug', async (req, res) => {
+  const q = (req.query.q as string) || '';
+  try {
+    const { searchIndex, rebuildSearchIndex } = await import('./src/notebookcheck_index');
+    const axios2 = (await import('axios')).default;
+    const rUrl   = process.env.UPSTASH_REDIS_REST_URL!;
+    const rToken = process.env.UPSTASH_REDIS_REST_TOKEN!;
+    // Get raw flat index size
+    const raw = await axios2.get(`${rUrl}/get/nbc:index:v4:search_index`,
+      { headers: { Authorization: `Bearer ${rToken}` } });
+    const flatRaw = raw.data?.result;
+    const flat = flatRaw ? JSON.parse(flatRaw) : [];
+    const indexSize = Array.isArray(flat) ? flat.length : 0;
+    const match = q ? await searchIndex(q).catch(() => null) : null;
+    return res.json({
+      success: true,
+      indexSize,
+      query: q || '(none)',
+      match: match ?? null,
+      hint: indexSize === 0 ? 'Index is empty — hit /api/index/rebuild-search first' : `${indexSize} entries in search index`,
+    });
+  } catch (e: any) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // /api/index/rebuild-search — rebuild the fast search index from entries

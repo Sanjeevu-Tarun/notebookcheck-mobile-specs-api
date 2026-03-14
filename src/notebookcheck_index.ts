@@ -873,6 +873,12 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   try {
     flat = await rGet(SEARCH_INDEX_KEY) as any[];
   } catch {
+    // Key missing — rebuild from entries
+    await rebuildSearchIndex();
+    try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
+  }
+  // If flat is empty, try rebuilding once — entries may have been added since last rebuild
+  if (!flat?.length) {
     await rebuildSearchIndex();
     try { flat = await rGet(SEARCH_INDEX_KEY) as any[]; } catch { return null; }
   }
