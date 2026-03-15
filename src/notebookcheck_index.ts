@@ -943,17 +943,39 @@ export async function rebuildSearchIndex(): Promise<void> {
   const byTitle  = new Map<string, IndexEntry>();
   const byPrefix = new Map<string, IndexEntry>();
 
+  // Variant words that distinguish models — used to make dedup keys unique per variant
+  const DEDUP_VARIANTS = [
+    'ultra','pro','plus','mini','lite','fe','max','edge',
+    'standard','turbo','fold','flip','xl','xr','se','5g','4g','go',
+  ];
+
   for (const e of Object.values(entries) as IndexEntry[]) {
     const isReview   = /-review[-_.]/i.test(e.url);
     // Normalise + → plus BEFORE stripping non-alnum, so "S25+" and "S25" get different keys.
-    // Without this, both map to "samsung galaxy s25" and one gets silently dropped from the search index.
     const titleKey   = e.title.toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9\s]/g, '').trim();
-    const slugPrefix = (e.slug || e.url.split('/').pop() || '')
+
+    // Slug-prefix dedup key: device name part of the slug (before "-review-").
+    // Problem: descriptive slugs like "Samsung-Galaxy-S25-review-Still-one-of-the-best..."
+    // produce slugPrefix="samsung galaxy s25" for BOTH the S25 and S25+ entries when the
+    // S25+ URL has a descriptive slug that omits "plus". This causes one to be silently dropped.
+    //
+    // Fix: append any variant words found in the TITLE but missing from the slug prefix.
+    // This makes "Samsung Galaxy S25+" produce key "samsung galaxy s25 plus" even when its
+    // URL slug has no "plus", so it never collides with the plain S25 entry.
+    const rawSlugPrefix = (e.slug || e.url.split('/').pop() || '')
       .replace(/\.\d+\.0\.html$/, '')
       .toLowerCase()
       .split(/-review[-_.]/i)[0]
       .replace(/-/g, ' ')
       .trim();
+    const titleLower = e.title.toLowerCase().replace(/\+/g, ' plus');
+    const missingVariants = DEDUP_VARIANTS.filter(v => {
+      const re = new RegExp('(?<![a-z0-9])' + v + '(?![a-z0-9])');
+      return re.test(titleLower) && !re.test(rawSlugPrefix);
+    });
+    const slugPrefix = missingVariants.length > 0
+      ? rawSlugPrefix + ' ' + missingVariants.join(' ')
+      : rawSlugPrefix;
 
     // Title-key dedup
     const exTitle = byTitle.get(titleKey);
@@ -1161,17 +1183,16 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
 
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    // Guard: result is more specific than what was asked -> wrong model
-    if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
-
     if (titleHitsAll) {
-      // Title matched — trust it, take the URL as-is. No slug check needed.
-      // NBC review slugs are often descriptive ("Still-one-of-the-best...") and
-      // don't always contain the model variant word even when it's the correct page.
+      // Title matched — trust it completely, pass the URL as-is.
+      // Only guard: title itself has an extra variant the query didn't ask for.
+      // Slug is NOT checked here — slugs are often descriptive and irrelevant.
+      if (hasExtraVariant(titleTokens)) continue;
       titleMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     } else if (slugHitsAll) {
-      // No title match — slug is the fallback. Slug must contain all query words
-      // including variants to be trusted (it's the only signal we have).
+      // Title didn't match — slug is the fallback.
+      // Only guard: slug has an extra variant the query didn't ask for.
+      if (hasExtraVariant(slugTokens)) continue;
       slugMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     }
   }
@@ -1221,10 +1242,10 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
     const slugHitsAll  = words.every(w => wbMatch(slugTokens,  w));
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    // Guard: result has extra variant not in query -> wrong model
-    if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
-    // Title match: trust it directly — no slug check needed.
-    // Slug match (fallback): slug already confirmed to contain all words above.
+    // Title match: only check title for extra variants — slug is irrelevant.
+    // Slug match: only check slug for extra variants.
+    if (titleHitsAll && hasExtraVariant(titleTokens)) continue;
+    if (!titleHitsAll && slugHitsAll && hasExtraVariant(slugTokens)) continue;
 
     const score = (titleHitsAll && slugHitsAll) ? 3 : titleHitsAll ? 2 : 1;
     results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });
