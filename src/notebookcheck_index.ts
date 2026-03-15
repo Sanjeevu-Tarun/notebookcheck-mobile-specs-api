@@ -1125,9 +1125,10 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     const titleTokens = entry.title.toLowerCase();
     const slugTokens  = slugToTokens(entry.slug || entry.url);
 
-    // Use word-boundary matching so "8" does not match inside "18", "80", "X800" etc.
+    // Word-boundary match: "8" must not be part of "18", "80" etc.
+    // Query tokens from split(/\s+/) are always plain alphanumeric — no regex escaping needed.
     const wbMatch = (tokens: string, w: string) =>
-      new RegExp('(?<![a-z0-9])' + w.replace(/[.*+?^${}()|[\]\]/g, '\\$&') + '(?![a-z0-9])').test(tokens);
+      new RegExp('(?<![a-z0-9])' + w + '(?![a-z0-9])').test(tokens);
     const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
     const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
 
