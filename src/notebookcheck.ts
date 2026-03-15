@@ -1121,6 +1121,14 @@ function isThumbnail(url: string): boolean {
   // Named angle shots: BRAND_DEVICE_top_HASH, BRAND_DEVICE_bottom_HASH, etc.
   if (/_(top|bottom|left|right|front|back|side|angle|hand|in_hand)_[a-f0-9]{6,}\.(jpe?g|png|webp)$/i.test(filename)) return false;
 
+  // NBC photographer shots: IMG_NNNN_edit_BIGNUM_HASH.ext
+  // e.g. csm_IMG_6272_edit_4941416292384_44f464defa.jpg (device product shot)
+  if (/^img_?[0-9]+_edit_\d+_[a-f0-9]{6,}\.(jpe?g|png|webp)$/i.test(filename)) return false;
+
+  // NBC date-stamped lab shots with _edit_ suffix
+  // e.g. csm_IMG_20240928_125737_edit_270951352759_fc02e6e1b6.jpg (connectivity angle)
+  if (/^img_\d{8}[_T]\d+.*_edit_\d+_[a-f0-9]{6,}\.(jpe?g|png|webp)$/i.test(filename)) return false;
+
   // All other _processed_ / csm_ URLs are thumbnails
   return true;
 }
@@ -2505,7 +2513,9 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
         || /^bild_[a-z0-9_]+-\d{2,4}$/i.test(fnBare)
         || /^bild_[a-z0-9_]+-view$/i.test(fnBare)
         || /^img_\d{8}[_T]\d.*_edit_\d/i.test(fnBare)   // NBC date-stamped lab shots
-        || /^img_?\d+.*_edit_\d/i.test(fnBare);           // NBC photographer device shots
+        || /^img_?\d+.*_edit_\d/i.test(fnBare)            // NBC photographer device shots
+        || /^img_?[0-9]+_edit_\d+_[a-f0-9]{6,}/i.test(fn)  // csm_ NBC photographer shots (with hash)
+        || /^img_\d{8}[_T]\d+.*_edit_\d+_[a-f0-9]{6,}/i.test(fn); // csm_ date-stamped lab shots (with hash)
       if (!hasClearCaption && !hasSectionContext && !hasClearFilename) return;
     }
 
