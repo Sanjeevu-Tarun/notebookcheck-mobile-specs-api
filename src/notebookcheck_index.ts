@@ -945,7 +945,9 @@ export async function rebuildSearchIndex(): Promise<void> {
 
   for (const e of Object.values(entries) as IndexEntry[]) {
     const isReview   = /-review[-_.]/i.test(e.url);
-    const titleKey   = e.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    // Normalise + → plus BEFORE stripping non-alnum, so "S25+" and "S25" get different keys.
+    // Without this, both map to "samsung galaxy s25" and one gets silently dropped from the search index.
+    const titleKey   = e.title.toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9\s]/g, '').trim();
     const slugPrefix = (e.slug || e.url.split('/').pop() || '')
       .replace(/\.\d+\.0\.html$/, '')
       .toLowerCase()
@@ -1161,6 +1163,9 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     let score = 0;
 
     if (titleHitsAll) {
+      // Title is the ground truth — NBC slugs often omit model suffixes like "Plus",
+      // "FE", "Ultra" (e.g. S25+ review slug just says "S25-review-...").
+      // Never penalise a full title match based on slug content.
       score = hasExtraVariant(titleTokens) ? 5000 : 10000;
     }
 
