@@ -1097,12 +1097,8 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   }
   if (!flat?.length) return null;
 
-  // Tokenize the raw user query — lowercase words, 2+ chars OR single digit
-  // Single digits are critical model discriminators: "pixel 8 pro" ≠ "pixel 9 pro".
-  // w.length >= 2 alone drops "8", "9", "3", making all "Pixel X Pro" queries identical.
-  const rawWords = q.toLowerCase().trim().split(/\s+/).filter(w =>
-    w.length >= 2 || /^\d+$/.test(w)
-  );
+  // Tokenize the raw user query — lowercase words, 2+ chars
+  const rawWords = q.toLowerCase().trim().split(/\s+/).filter(w => w.length >= 2);
   if (!rawWords.length) return null;
 
   // Variant suffix list — if title/slug has one of these but query doesn't,
@@ -1125,11 +1121,8 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
     const titleTokens = entry.title.toLowerCase();
     const slugTokens  = slugToTokens(entry.slug || entry.url);
 
-    // Use word-boundary matching so "8" does not match inside "18", "80", "X800" etc.
-    const wbMatch = (tokens: string, w: string) =>
-      new RegExp('(?<![a-z0-9])' + w.replace(/[.*+?^${}()|[\]\]/g, '\\$&') + '(?![a-z0-9])').test(tokens);
-    const titleHitsAll = rawWords.every(w => wbMatch(titleTokens, w));
-    const slugHitsAll  = rawWords.every(w => wbMatch(slugTokens, w));
+    const titleHitsAll = rawWords.every(w => titleTokens.includes(w));
+    const slugHitsAll  = rawWords.every(w => slugTokens.includes(w));
 
     // Neither title nor slug contains all query words — skip entirely
     if (!titleHitsAll && !slugHitsAll) continue;
@@ -1292,7 +1285,7 @@ export async function migrateToReviewUrls(batchSize = 200): Promise<MigrateResul
   await rSet(MIGRATE_CURSOR_KEY, newCursor, 30 * 24 * 3600);
   await rSet(MIGRATE_STATS_KEY,  stats,     30 * 24 * 3600);
 
-  // On completion:rebuild search index and clear migration state
+  // On completion: rebuild search index and clear migration state
   if (done) {
     await rebuildSearchIndex();
     await rDel(MIGRATE_CURSOR_KEY);
