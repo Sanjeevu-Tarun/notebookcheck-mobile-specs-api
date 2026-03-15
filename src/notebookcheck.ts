@@ -728,7 +728,7 @@ function scoreCandidate(title: string, url: string, nq: string, originalQuery: s
 function extractLinks(html: string, nq: string, oq: string, seen: Set<string>): SearchResult[] {
   const $ = cheerio.load(html);
   const results: SearchResult[] = [];
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((_: number, el: any) => {
     let href = $(el).attr('href') || '';
     const uddg = href.match(/uddg=([^&]+)/);
     if (uddg) href = decodeURIComponent(uddg[1]);
@@ -1207,7 +1207,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     }
   }
   if (!data.rating) {
-    $('[class*="rating"], [class*="score"]').each((_, el) => {
+    $('[class*="rating"], [class*="score"]').each((_: number, el: any) => {
       const t = $(el).text().trim();
       const m = t.match(/(very good|good|excellent|average|poor)[^(]*\(?(\d{2,3})%\)?/i) || t.match(/(\d{2,3})%[^)]{0,20}(very good|good|excellent|average|poor)/i);
       if (m && !data.rating) { const pct = m[1].match(/^\d/) ? m[1] : m[2]; const label = m[1].match(/^\d/) ? m[2] : m[1]; if (pct) { data.rating = pct + '%'; data.ratingLabel = label.toLowerCase().trim(); } }
@@ -1233,7 +1233,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   if (!data.publishDate) { const dm = html.match(/Published\s+(\d{1,2}\/\d{1,2}\/\d{4})/i) || bodyText.match(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/); if (dm) data.publishDate = dm[1]; }
 
   // ══ VERDICT ══
-  $('h2, h3, h4').each((_, el) => {
+  $('h2, h3, h4').each((_: number, el: any) => {
     const h = $(el).text().toLowerCase();
     if ((h.includes('verdict') || h.includes('conclusion') || h.includes('result')) && !data.verdict) {
       let sib = $(el).next();
@@ -1241,14 +1241,14 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       while (sib.length && !verdictFound) { const t = norm(sib.text()); if (t.length > 100 && !t.includes('Download') && !t.includes('cookie') && !t.includes('{')) { data.verdict = t.slice(0, 900); verdictFound = true; } sib = sib.next(); }
     }
   });
-  if (!data.verdict) { $('p').each((_, el) => { const t = norm($(el).text()); if (t.length > 150 && !data.verdict && !t.toLowerCase().includes('cookie') && !t.includes('{')) data.verdict = t.slice(0, 900); }); }
+  if (!data.verdict) { $('p').each((_: number, el: any) => { const t = norm($(el).text()); if (t.length > 150 && !data.verdict && !t.toLowerCase().includes('cookie') && !t.includes('{')) data.verdict = t.slice(0, 900); }); }
 
   // ══ PROS & CONS ══
   const prosSeen = new Set<string>(); const consSeen = new Set<string>();
-  $('[class*="pro_eintrag"], [class="pro"]').each((_, el) => { const t = cleanCellText($, el).replace(/^[+✓•✚]\s*/, ''); if (t.length > 2 && t.length < 300 && !t.includes('{') && !prosSeen.has(t)) { prosSeen.add(t); data.pros.push(t); } });
-  $('[class*="contra_eintrag"], [class="contra"]').each((_, el) => { const t = cleanCellText($, el).replace(/^[-−✗•]\s*/, ''); if (t.length > 2 && t.length < 300 && !t.includes('{') && !consSeen.has(t)) { consSeen.add(t); data.cons.push(t); } });
+  $('[class*="pro_eintrag"], [class="pro"]').each((_: number, el: any) => { const t = cleanCellText($, el).replace(/^[+✓•✚]\s*/, ''); if (t.length > 2 && t.length < 300 && !t.includes('{') && !prosSeen.has(t)) { prosSeen.add(t); data.pros.push(t); } });
+  $('[class*="contra_eintrag"], [class="contra"]').each((_: number, el: any) => { const t = cleanCellText($, el).replace(/^[-−✗•]\s*/, ''); if (t.length > 2 && t.length < 300 && !t.includes('{') && !consSeen.has(t)) { consSeen.add(t); data.cons.push(t); } });
   if (data.pros.length === 0 && data.cons.length === 0) {
-    $('li').each((_, el) => {
+    $('li').each((_: number, el: any) => {
       const raw = cleanCellText($, el);
       if (raw.startsWith('+ ') || raw.startsWith('✓ ') || raw.startsWith('✚ ')) { const p = raw.replace(/^[+✓✚]\s+/, ''); if (p.length > 2 && p.length < 300 && !prosSeen.has(p)) { prosSeen.add(p); data.pros.push(p); } }
       else if (raw.startsWith('- ') || raw.startsWith('− ') || raw.startsWith('✗ ')) { const c = raw.replace(/^[-−✗]\s+/, ''); if (c.length > 2 && c.length < 300 && !consSeen.has(c)) { consSeen.add(c); data.cons.push(c); } }
@@ -1267,7 +1267,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
 
   const specs: Record<string, string> = {};
 
-  $('table tr').each((_, row) => {
+  $('table tr').each((_: number, row: any) => {
     const cells = $(row).find('td, th'); if (cells.length < 2) return;
     const k = cleanCellText($, cells.eq(0)[0]).replace(/:$/, '');
     const found = NBC_SPEC_LABELS.find(([l]) => l === k); if (!found || specs[found[0]]) return;
@@ -1275,7 +1275,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     if (v && v.length > 0 && v.length < 1500 && !v.includes('{') && !v.startsWith(':')) { specs[found[0]] = v; data.specs[found[1]] = v; }
   });
 
-  $('td, th, dt, span, div').each((_, el) => {
+  $('td, th, dt, span, div').each((_: number, el: any) => {
     const t = cleanCellText($, el);
     const found = NBC_SPEC_LABELS.find(([l]) => t === l || t === l + ':');
     if (found) {
@@ -1367,14 +1367,14 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   // Strategy: walk <table> cells containing the key label, grab the adjacent value cell.
   function domFindMeasurement(labelRe: RegExp): string {
     let found = '';
-    $('td, th').each((_, el) => {
+    $('td, th').each((_: number, el: any) => {
       if (found) return false; // break
       const label = norm($(el).text());
       if (!labelRe.test(label)) return;
       const $row = $(el).closest('tr');
       // Value is typically the next <td> in the same row
       const cells = $row.find('td');
-      cells.each((_, cell) => {
+      cells.each((_: number, cell: any) => {
         if (found) return false;
         const t = norm($(cell).text());
         if (/[\d.]+/.test(t) && t !== label) { found = t; }
@@ -1388,7 +1388,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   // where the value lives in a structured spec table cell rather than prose.
   function domFindSpecField(labelRe: RegExp): string {
     let found = '';
-    $('td, th, dt').each((_, el) => {
+    $('td, th, dt').each((_: number, el: any) => {
       if (found) return false;
       const label = norm($(el).text());
       if (!labelRe.test(label)) return;
@@ -1400,7 +1400,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       }
       // Fallback: any other <td> in the same <tr>
       const $row = $(el).closest('tr');
-      $row.find('td').each((_, cell) => {
+      $row.find('td').each((_: number, cell: any) => {
         if (found) return false;
         const t = cleanCellText($, cell as import('domhandler').Element);
         if (t && t.length > 1 && !labelRe.test(t)) { found = t; }
@@ -1718,7 +1718,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
 
   // ══ COLOR OPTIONS ══
   const NON_COLOR = new Set(['europe', 'asia', 'global', 'china', 'india', 'usa', 'america', 'international', 'uk', 'dual', 'single', 'sim', 'standard', 'edition', 'version', 'variant', 'model', 'review', 'test', 'market', 'region', 'country']);
-  $('[class*="color-option"], [class*="colorOption"], [class*="color_option"], [class*="variant-selector"], [data-color], [aria-label*="color"], [class*="swatches"] a, [class*="color-picker"] span').each((_, el) => {
+  $('[class*="color-option"], [class*="colorOption"], [class*="color_option"], [class*="variant-selector"], [data-color], [aria-label*="color"], [class*="swatches"] a, [class*="color-picker"] span').each((_: number, el: any) => {
     const t = ($(el).attr('data-color') || $(el).attr('aria-label') || $(el).attr('title') || cleanCellText($, el)).trim();
     if (t && t.length > 2 && t.length < 40 && !NON_COLOR.has(t.toLowerCase()) && !/\d/.test(t) && !data.colorOptions.includes(t)) data.colorOptions.push(t);
   });
@@ -2241,7 +2241,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     }
 
     // Grab per-device comparison images from each .nbcCI_zoom
-    $whole.find('.nbcCI_zoom').each((_, el) => {
+    $whole.find('.nbcCI_zoom').each((_: number, el: any) => {
       const $el     = $(el);
       const href    = $el.find('a[href]').first().attr('href') || '';
       if (!href) return;
@@ -2333,7 +2333,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   {
     let currentSection = '';
     // Walk every element in document order using cheerio's * selector
-    $('h2, a[href]').each((_, el) => {
+    $('h2, a[href]').each((_: number, el: any) => {
       if ($(el).is('h2')) {
         currentSection = $(el).text().toLowerCase();
       } else {
@@ -2387,7 +2387,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     return null;
   }
 
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((_: number, el: any) => {
     const href = $(el).attr('href') || '';
     if (!href) return;
     const resolved = resolveNbcUrl(href);
@@ -2448,7 +2448,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
   // Covers hero images and device photos that NBC serves only as <img> with no
   // wrapping <a href>. The src may point to a csm_* thumbnail — in that case
   // we only accept it when the caption or filename clearly identifies the type.
-  $('img[src]').each((_, el) => {
+  $('img[src]').each((_: number, el: any) => {
     const src = $(el).attr('src') || $(el).attr('data-src') || '';
     if (!src) return;
     const resolved = resolveNbcUrl(src);
@@ -2783,7 +2783,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     }
 
     let subTest = '';
-    $t.find('tr').each((_, row) => {
+    $t.find('tr').each((_: number, row: any) => {
       const $row = $(row);
 
       const settingsCell = $row.find('td.settings_header');
@@ -2870,7 +2870,7 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     const firstRowThs = $t.find('tr').first().find('th');
     const isComparisonTable = firstRowThs.length >= 2 && firstRowThs.eq(1).find('a').length > 0;
 
-    $t.find('tr').each((_, row) => {
+    $t.find('tr').each((_: number, row: any) => {
       const $row2 = $(row);
       if ($row2.find('th').length > 0 && isComparisonTable) return;
       if (($row2.attr('class') || '').includes('subheader')) return;

@@ -266,7 +266,12 @@ async function saveEntries(e: Record<string, IndexEntry>): Promise<void> {
   // If we still can't acquire after retries, proceed anyway rather than losing data —
   // the worst case is a write collision, which is the same as the pre-fix behaviour.
   try {
-    await rSetPermanent(ENTRIES_KEY, e);
+    const json = JSON.stringify(e);
+    // Warn at 800KB — Upstash default max is 1MB, this gives headroom
+    if (json.length > 800_000) {
+      console.warn(`[saveEntries] WARN: entries blob is ${(json.length / 1024).toFixed(0)}KB — approaching Upstash 1MB limit. Consider sharding.`);
+    }
+    await rSetPermanent(ENTRIES_KEY, e); // rSetPermanent calls JSON.stringify internally
   } catch (err: any) {
     console.error('[saveEntries] FAILED — entries NOT saved:', err?.message ?? err);
     throw err;
@@ -354,7 +359,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
 
   for (const sel of reviewSectionSelectors) {
     if (reviewUrl) break;
-    $(sel).each((_, el) => {
+    $(sel).each((_: number, el: any) => {
       if (reviewUrl) return;
       let href = $(el).attr('href') || '';
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -378,7 +383,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
     // Use first 3 words as a minimum match requirement
     const matchWords = slugWords.slice(0, Math.min(4, slugWords.length));
 
-    $('a[href]').each((_, el) => {
+    $('a[href]').each((_: number, el: any) => {
       if (reviewUrl) return;
       let href = $(el).attr('href') || '';
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -400,7 +405,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
   // Strategy 3: Last resort — scan all links for any review URL whose slug starts
   // with the full library slug prefix (exact match on the device name part)
   if (!reviewUrl) {
-    $('a[href]').each((_, el) => {
+    $('a[href]').each((_: number, el: any) => {
       if (reviewUrl) return;
       let href = $(el).attr('href') || '';
       if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
@@ -512,7 +517,7 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
   const out: Array<{ url: string; title: string }> = [];
   const seen = new Set<string>();
 
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((_: number, el: any) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
     else if (!href.startsWith('http')) return;
@@ -561,7 +566,7 @@ export function extractPhoneUrls(html: string): Array<{ url: string; title: stri
 export interface CrawlPageResult {
   page: number; phonesFound: number; totalUrls: number;
   newUrls: number; done: boolean; nextPage: number | null; durationMs: number;
-  source: 'reviews' | 'chrono';
+  source: 'reviews' | 'chrono' | 'smartphone';
 }
 
 function makeEntry(url: string, title: string, source: 'review' | 'library' = 'library'): IndexEntry {
@@ -582,7 +587,7 @@ export async function crawlReviewsPage(page: number): Promise<CrawlPageResult> {
   // Source A page is pre-filtered to phones + internal reviews only.
   // No need to check for -review- in the slug — trust the page content.
   // Still skip junk slugs (comparisons, camera tests, etc.) just in case.
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((_: number, el: any) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
     href = href.split('?')[0];
@@ -630,7 +635,7 @@ export async function crawlSmartphonePage(page: number): Promise<CrawlPageResult
   const found: Array<{ url: string; title: string }> = [];
   const seen = new Set<string>();
 
-  $('a[href]').each((_, el) => {
+  $('a[href]').each((_: number, el: any) => {
     let href = $(el).attr('href') || '';
     if (href.startsWith('/')) href = 'https://www.notebookcheck.net' + href;
     href = href.split('?')[0];

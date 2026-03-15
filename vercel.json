@@ -10,10 +10,11 @@
       }
     }
   ],
-  "routes": [
+  "routes": [{ "src": "/(.*)", "dest": "/index.ts" }],
+  "crons": [
     {
-      "src": "/(.*)",
-      "dest": "/index.ts"
+      "path": "/api/nbc/keepalive",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

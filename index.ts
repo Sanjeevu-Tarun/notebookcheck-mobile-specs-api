@@ -108,7 +108,7 @@ app.get('/api/phone/debug', async (req, res) => {
       if (result?.success) {
         data = result.data;
         cached = !!result.cached;
-        source = cached ? 'redis-cache' : 'index-scrape';
+        source = result.cached ? 'device-cache' : 'index';
       }
     }
 
