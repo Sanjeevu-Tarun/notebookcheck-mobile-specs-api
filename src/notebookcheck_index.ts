@@ -1138,16 +1138,16 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
   }
 
   // ── MATCHING LOGIC ─────────────────────────────────────────────────────────
-  // Priority 1: title contains all query words  -> title match
-  // Priority 2: slug/URL contains all query words -> slug match
-  // Otherwise  : skip -> caller falls through to SearXNG
+  // Priority 1: title contains all query words -> trust it, pass the URL directly.
+  //   NBC slugs are often descriptive and don't repeat the model name — the title
+  //   is the reliable field. If title matches, we're done.
   //
-  // Guards (applied to both paths):
-  //   a) Result has a variant the query didn't ask for -> wrong model, skip
-  //      e.g. query="s25", result title has "plus" -> skip
-  //   b) Query has variant words but slug is missing them -> slug contradicts -> skip
-  //      e.g. query="s25 plus", slug="Samsung-Galaxy-S25-review-..." -> no "plus" -> skip
-  //      Catches stale/wrong titles stored against the wrong URL during crawl.
+  // Priority 2: title didn't match -> try slug/URL.
+  //   Only accepted if the slug contains all query words including any variant
+  //   (slug must explicitly confirm the model when title can't).
+  //
+  // Guard (both paths): result has a variant the query didn't ask for -> wrong model, skip.
+  //   e.g. query="s25", result title has "plus" -> skip (too specific)
 
   const titleMatches: Array<{ url: string; title: string; titleLen: number }> = [];
   const slugMatches:  Array<{ url: string; title: string; titleLen: number }> = [];
@@ -1161,15 +1161,17 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
 
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    // Guard a: wrong model — result is more specific than what was asked
+    // Guard: result is more specific than what was asked -> wrong model
     if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
 
-    // Guard b: variant query but slug missing the variant -> definitively wrong URL
-    if (queryVariants.length > 0 && !queryVariants.every(v => wbMatch(slugTokens, v))) continue;
-
     if (titleHitsAll) {
+      // Title matched — trust it, take the URL as-is. No slug check needed.
+      // NBC review slugs are often descriptive ("Still-one-of-the-best...") and
+      // don't always contain the model variant word even when it's the correct page.
       titleMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
-    } else {
+    } else if (slugHitsAll) {
+      // No title match — slug is the fallback. Slug must contain all query words
+      // including variants to be trusted (it's the only signal we have).
       slugMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
     }
   }
@@ -1219,10 +1221,10 @@ export async function searchIndexAll(q: string): Promise<Array<{ url: string; ti
     const slugHitsAll  = words.every(w => wbMatch(slugTokens,  w));
     if (!titleHitsAll && !slugHitsAll) continue;
 
-    // Guard a: result has extra variant not in query -> wrong model
+    // Guard: result has extra variant not in query -> wrong model
     if (hasExtraVariant(titleTokens) || hasExtraVariant(slugTokens)) continue;
-    // Guard b: variant in query but slug missing it -> wrong URL
-    if (queryVariants.length > 0 && !queryVariants.every(v => wbMatch(slugTokens, v))) continue;
+    // Title match: trust it directly — no slug check needed.
+    // Slug match (fallback): slug already confirmed to contain all words above.
 
     const score = (titleHitsAll && slugHitsAll) ? 3 : titleHitsAll ? 2 : 1;
     results.push({ url: entry.url, title: entry.title, slug: entry.slug, score, titleTokens, slugTokens });
