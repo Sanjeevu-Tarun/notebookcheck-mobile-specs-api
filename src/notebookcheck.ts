@@ -1092,7 +1092,13 @@ function isThumbnail(url: string): boolean {
 
   // Camera sample originals — the raw camera-roll file is always better; keep as thumbnail
   if (/^pxl_\d{8}/i.test(filename)) return true;
-  if (/^(img_?\d|dsc_?\d|dcim|sam_|fotos_kamera|foto_|photo_)/i.test(filename)) return true;
+  // Block camera-roll originals — raw files that are always worse than NBC's resized versions.
+  // EXCEPTION: NBC photographer shots have "_edit_DIGITS" suffix (e.g. IMG_6272_edit_4941416292384.jpg)
+  // and date-stamped lab shots have IMG_YYYYMMDD_* pattern — these are genuine device photos, not thumbnails.
+  if (/^(img_?\d|dsc_?\d|dcim|sam_|fotos_kamera|foto_|photo_)/i.test(filename)
+      && !/_edit_\d{4,}/i.test(filename)       // NBC photographer post-processed shot → keep
+      && !/^img_\d{8}[_T]\d/i.test(filename)  // NBC date-stamped lab shot → keep
+  ) return true;
 
   // "Portrait Studio" shots are camera samples taken BY the phone, not device photos.
   // Must be checked BEFORE the numbered-device-photo allowlist below so they are
@@ -2072,6 +2078,11 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     //   - Portrait_Studio_*.jpg — camera sample shot taken by the phone (portrait mode)
     if (/fotos_kamera/i.test(filename)) return 'cameraSamples';
     if (/^pxl_\d{8}/i.test(filename)) return 'cameraSamples';
+    // NBC photographer shots have _edit_BIGNUM in the name (post-processed in Lightroom/Photoshop)
+    // e.g. IMG_6272_edit_4941416292384.jpg → device product shot (not a camera sample)
+    // e.g. IMG_20240928_125737_edit_270951352759.jpg → date-stamped lab angle shot → deviceAngles
+    if (/^img_\d{8}[_T]\d.*_edit_\d/i.test(filename)) return 'deviceAngles'; // date-stamped lab shots
+    if (/^img_?\d+.*_edit_\d/i.test(filename)) return 'device';               // NBC photographer device shots
     if (/^img_?\d+/i.test(filename)) return 'cameraSamples';
     if (/^dsc_?\d+/i.test(filename)) return 'cameraSamples';
     if (/^dcim/i.test(filename)) return 'cameraSamples';
@@ -2484,7 +2495,9 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
         || /^[a-z0-9]+(?:_[a-z0-9]+)+_\d{1,2}$/i.test(fnBare)
         || /_(top|bottom|left|right|front|back|side|angle)$/i.test(fnBare)
         || /^bild_[a-z0-9_]+-\d{2,4}$/i.test(fnBare)
-        || /^bild_[a-z0-9_]+-view$/i.test(fnBare);
+        || /^bild_[a-z0-9_]+-view$/i.test(fnBare)
+        || /^img_\d{8}[_T]\d.*_edit_\d/i.test(fnBare)   // NBC date-stamped lab shots
+        || /^img_?\d+.*_edit_\d/i.test(fnBare);           // NBC photographer device shots
       if (!hasClearCaption && !hasSectionContext && !hasClearFilename) return;
     }
 
