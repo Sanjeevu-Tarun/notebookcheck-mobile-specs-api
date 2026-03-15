@@ -935,20 +935,26 @@ const SEARCH_INDEX_KEY = `nbc:index:v4:search_index`;
 export async function rebuildSearchIndex(): Promise<void> {
   const entries = await loadEntries();
 
-  // Each unique URL is its own entry — no slug-prefix dedup.
-  // Title-key dedup only removes true duplicates (same title, two URLs for same device).
-  // Prefer review URL over library URL when titles match exactly.
-  const byTitle = new Map<string, IndexEntry>();
+  // Dedup key = titleKey + ":" + first 30 chars of URL slug.
+  // Using title alone caused entries with a stale/wrong title (e.g. A55 crawled as
+  // "Samsung Galaxy A50s") to be merged with the real A50s entry and dropped from the
+  // flat index, making slug-fallback search impossible for the affected device.
+  // The slug prefix ensures two entries that share an incorrect title but point to
+  // different URLs are kept as separate rows. Within the same (title+slug) group,
+  // still prefer review URLs over library URLs.
+  const byKey = new Map<string, IndexEntry>();
   for (const e of Object.values(entries) as IndexEntry[]) {
     const isReview = /-review[-_.]/i.test(e.url);
     const titleKey = e.title.toLowerCase().replace(/\+/g, 'plus').replace(/[^a-z0-9\s]/g, '').trim();
-    const existing = byTitle.get(titleKey);
+    const slugPrefix = (e.slug || e.url.split('/').pop() || '').slice(0, 30).toLowerCase();
+    const dedupKey = `${titleKey}:${slugPrefix}`;
+    const existing = byKey.get(dedupKey);
     if (!existing || (isReview && !/-review[-_.]/i.test(existing.url))) {
-      byTitle.set(titleKey, e);
+      byKey.set(dedupKey, e);
     }
   }
 
-  const flat = Array.from(byTitle.values()).map((e: IndexEntry) => ({
+  const flat = Array.from(byKey.values()).map((e: IndexEntry) => ({
     url: e.url, title: e.title, slug: e.slug,
   }));
   await rSetPermanent(SEARCH_INDEX_KEY, flat);
@@ -1132,7 +1138,10 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
 
   for (const entry of flat) {
     const titleTokens = normalizeTokens(entry.title);
-    const slugTokens  = normalizeTokens(slugToTokens(entry.slug || entry.url));
+    // Always derive slug tokens from URL when entry.slug is absent — the URL is
+    // authoritative and correctly identifies the device even when the stored title is stale.
+    const rawSlug    = entry.slug || entry.url.split('/').pop() || entry.url;
+    const slugTokens = normalizeTokens(slugToTokens(rawSlug));
 
     const titleHitsAll = words.every(w => wbMatch(titleTokens, w));
     const slugHitsAll  = words.every(w => wbMatch(slugTokens,  w));
@@ -1143,7 +1152,9 @@ export async function searchIndex(q: string, _nq?: string): Promise<{ url: strin
       if (hasExtraVariant(titleTokens)) continue;      // wrong model variant
       if (hasConnectivityConflict(titleTokens)) continue; // 4G vs 5G conflict
       titleMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
-    } else if (slugHitsAll) {
+    } else {
+      // slugHitsAll is true here (both-miss guard above already skipped other cases).
+      // Title is stale/wrong — trust the slug/URL which is set at crawl time and never mutated.
       if (hasExtraVariant(slugTokens)) continue;
       if (hasConnectivityConflict(slugTokens)) continue;
       slugMatches.push({ url: entry.url, title: entry.title, titleLen: entry.title.length });
