@@ -619,7 +619,7 @@ app.get('/api/processor/search', async (req, res) => {
 // Returns nextPage: N if more pages remain, null if complete
 app.get('/api/index/crawl', async (req, res) => {
   const startPage = parseInt(req.query.startPage as string || '1');
-  const maxPages  = Math.min(parseInt(req.query.maxPages as string || '40'), 100);
+  const maxPages  = Math.min(parseInt(req.query.maxPages as string || '35'), 35); // 35 pages × ~1.5s ≈ 52s, safe under 60s maxDuration
   const delayMs   = parseInt(req.query.delayMs as string || '600');
 
   // Always force-delete lock directly via Redis REST before crawling.
