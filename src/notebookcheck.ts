@@ -1970,7 +1970,8 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // ── CHARTS (before cameraSamples — guards "Chart 1", "Diagramm") ──────────
     // NBC chart captions: "Chart 1", "Chart 1 Lux", "Diagramm 1", "GNSS",
     // "Battery log", "GPS log", "Signal chart", "Navigation", "Satellite constellations"
-    if (/\bgnss\b|\bgps\s*log\b|\bbattery\s*log\b|\bsignal\s*chart\b|\bnavigation\b|\bsatellite/i.test(c)
+    if (/\bortung\b/i.test(c)  // German: location tracking = GNSS chart
+        || /\bgnss\b|\bgps\s*log\b|\bbattery\s*log\b|\bsignal\s*chart\b|\bnavigation\b|\bsatellite/i.test(c)
         || /\bchart\s*\d/i.test(c)
         || /\bdiagramm\b/i.test(c)
         || /^\s*chart\s*$/i.test(c)) {
@@ -2043,6 +2044,13 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // ── DISPLAY MEASUREMENTS ──────────────────────────────────────────────────
     // NBC oscilloscope waveform images are named RigolDS{N}.jpg or SDS{N}.jpg
     // ("Rigol DS" is the oscilloscope model used in NBC's lab)
+    // "Ortung" = German for location tracking — NBC GNSS/GPS chart images
+    // e.g. Ortung_iPhone_16_Plus_Ueberblick.jpg, Ortung_Garmin_Venu_2_*.jpg
+    if (/^ortung_/i.test(filename)) return 'charts';
+
+    // Windows webcam shots (WIN_YYYYMMDD_HHMMSS_Pro.jpg) — screenshots/lab reference shots
+    if (/^win_\d{8}_\d{6}/i.test(filename)) return 'screenshots';
+
     if (/^(rigolds|sds)\d+/i.test(filename)) return 'displayMeasurements';
     // subpixel_matrix is a display microscopy shot — belongs with display measurements
     if (/subpixel[_\-]?matrix/i.test(filename)) return 'displayMeasurements';
