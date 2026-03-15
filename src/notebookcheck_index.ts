@@ -243,6 +243,9 @@ export async function recoverDeletedReviewUrls(): Promise<{ recovered: number; a
   return { recovered, alreadyPresent, totalCacheKeys };
 }
 
+const WRITE_LOCK_KEY = `nbc:index:${INDEX_VERSION}:write_lock`;
+const WRITE_LOCK_TTL = 15; // 15s — one save takes <2s; this prevents pile-up
+
 // ── ENTRY STORE ───────────────────────────────────────────────────────────────
 
 async function loadEntries(): Promise<Record<string, IndexEntry>> {
@@ -251,11 +254,24 @@ async function loadEntries(): Promise<Record<string, IndexEntry>> {
 }
 
 async function saveEntries(e: Record<string, IndexEntry>): Promise<void> {
+  // Acquire a short-lived write lock to prevent concurrent crawl jobs from
+  // clobbering each other's updates (read-modify-write race on the entries blob).
+  // Retry up to 6× with 500ms backoff (total wait ≤3s) before giving up.
+  let acquired = false;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    acquired = await rSetNX(WRITE_LOCK_KEY, '1', WRITE_LOCK_TTL);
+    if (acquired) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  // If we still can't acquire after retries, proceed anyway rather than losing data —
+  // the worst case is a write collision, which is the same as the pre-fix behaviour.
   try {
     await rSetPermanent(ENTRIES_KEY, e);
   } catch (err: any) {
     console.error('[saveEntries] FAILED — entries NOT saved:', err?.message ?? err);
-    throw err; // re-throw so callers know the save failed
+    throw err;
+  } finally {
+    if (acquired) await rDel(WRITE_LOCK_KEY).catch(() => {});
   }
 }
 
@@ -432,18 +448,6 @@ function extractBrand(title: string): string {
 }
 
 // ── URL EXTRACTOR ─────────────────────────────────────────────────────────────
-
-// Library URLs are short device-name slugs: "Samsung-Galaxy-S25-Ultra.975474.0.html"
-// Review URLs are descriptive article slugs: "Can-the-Redmi-Note-15-5G-win-everyone-over.1237258.0.html"
-// This distinction is URL-pattern based and works even without the source field.
-const LIBRARY_STOP_WORDS = /^(the|a|an|is|in|for|with|of|to|and|but|or|can|win|over|more|than|just|most|best|why|how|what|when|does|this|that|its|new|all|vs|review|test|smartphone|by|from|at|on|be|are|was|has|have|not|no|if|as|up|do|go)$/i;
-
-function isLibraryUrl(url: string): boolean {
-  const slug = (url.split('/').pop() || '').replace(/\.\d+\.0\.html$/, '');
-  const words = slug.split('-').filter(w => w.length > 0);
-  // Library slugs: ≤6 words, no stop/article/verb words
-  return words.length <= 6 && !words.some(w => LIBRARY_STOP_WORDS.test(w));
-}
 
 // ── JUNK SLUG FILTER ─────────────────────────────────────────────────────────
 // Rejects NBC article URLs that are NOT full device reviews:
@@ -1015,64 +1019,6 @@ export async function purgeLibraryDuplicates(): Promise<{ purged: number; kept: 
   await rebuildSearchIndex();
 
   return { purged: toDelete.length, kept: Object.keys(entries).length, reasons };
-}
-
-// Normalise the stored title for matching.
-// Index titles from the Chronological crawl are already clean: "Vivo X300 Pro", "Samsung Galaxy S26 Ultra".
-// We just lowercase and trim. The old snippet-stripping logic was for SearXNG result titles
-// which are no longer stored here.
-function cleanIndexTitle(raw: string): string {
-  // Strip a leading score like "88% " if somehow present (legacy entries)
-  return raw.replace(/^\d+%\s*/, '').toLowerCase().trim();
-}
-
-// Pre-compiled word boundary regex cache: avoids re-compiling the same regex
-// for every entry (1800+ iterations) on every request.
-const _wordBoundaryCache = new Map<string, RegExp>();
-function wordBoundaryRe(word: string): RegExp {
-  let re = _wordBoundaryCache.get(word);
-  if (!re) {
-    re = new RegExp(`(?<![a-z0-9])${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`);
-    _wordBoundaryCache.set(word, re);
-  }
-  return re;
-}
-
-// Score an index entry title against a user query.
-// Titles in the index are clean: "Vivo X300 Pro", "Samsung Galaxy S26 Ultra".
-// The stored URL is always the NBC internal review URL (resolved at crawl time by
-// resolveToReviewUrl), so scoring only needs to find the best title match.
-// Rules:
-//   1. ALL query words must appear in the title (hard reject if any missing)
-//   2. Exact match → 10000, title-contains-query → 8000
-//   3. Each variant word in the title that the query DIDN'T ask for → -2000 penalty
-//      (e.g. query "samsung s25" vs title "Samsung Galaxy S25 Ultra" → -2000 for "ultra")
-//   4. Shorter title = small length bonus (more precise match)
-function scoreIndexMatch(entryTitle: string, query: string): number {
-  const d = cleanIndexTitle(entryTitle);
-  const q = query.toLowerCase().trim();
-  const qWords = q.split(/\s+/).filter((w: string) => w.length > 1);
-
-  const wordIn = (word: string, text: string) => wordBoundaryRe(word).test(text);
-
-  // Hard reject: any query word missing from the title
-  if (!qWords.every((w: string) => wordIn(w, d))) return -1;
-
-  // Exact or contains match — highest confidence
-  if (d === q) return 10000;
-  if (d.includes(q)) return 8000;
-
-  // Penalise extra variant words in title that query didn't include
-  const variants = ['ultra', 'pro', 'plus', 'mini', 'lite', 'fe', 'max', 'edge', 'standard', 'turbo', 'fold', 'flip', 'xl', 'xr', 'se', '5g', '4g', 'go'];
-  let penalty = 0;
-  for (const v of variants) {
-    if (wordIn(v, d) && !wordIn(v, q)) penalty += 2000;
-  }
-
-  // Bonus for shorter title (fewer extra words = closer match)
-  const lengthBonus = Math.max(0, 500 - d.length * 5);
-
-  return 5000 - penalty + lengthBonus;
 }
 
 // Normalise a slug or URL into a searchable token string.

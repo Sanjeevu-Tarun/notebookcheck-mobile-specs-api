@@ -1,7 +1,5 @@
 import express from 'express';
 import cors from 'cors';
-// scraper legacy functions removed
-import './src/scraper';
 import { getNotebookCheckData, searchNotebookCheck, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
 import { getGSMArenaData, searchGSMArena, scrapeGSMArenaDevice } from './src/gsmarena';
 import {
