@@ -2159,7 +2159,7 @@ app.get('/api/index/clean-titles', async (req, res) => {
   }
 });
 
-// /api/index/rebuild-search — rebuild the fast search index from entries
+// /api/index/rebuild-search—rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {
     await rebuildSearchIndex();
