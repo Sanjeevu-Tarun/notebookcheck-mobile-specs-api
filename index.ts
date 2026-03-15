@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { getNotebookCheckDataFast, scrapeNotebookCheckDevice, debugNBCSearch } from './src/notebookcheck';
+import { getNotebookCheckDataFast, scrapeNotebookCheckDevice, debugNBCSearch, clearFullCache } from './src/notebookcheck';
 import { getGSMArenaData, searchGSMArena, scrapeGSMArenaDevice } from './src/gsmarena';
 import {
   getNotebookCheckProcessor,
@@ -64,6 +64,8 @@ app.get('/api/phone', async (req, res) => {
 
   try {
     if (nocache) {
+      // Clear full-result cache FIRST — otherwise it fires before device cache check
+      await clearFullCache(q).catch(() => {});
       const { clearScrapeCache, searchIndex } = await import('./src/notebookcheck_index');
       const best = await searchIndex(q).catch(() => null);
       if (best) await clearScrapeCache(best.url).catch(() => {});
@@ -2159,7 +2161,7 @@ app.get('/api/index/clean-titles', async (req, res) => {
   }
 });
 
-// /api/index/rebuild-search—rebuild the fast search index from entries
+// /api/index/rebuild-search — rebuild the fast search index from entries
 app.get('/api/index/rebuild-search', async (req, res) => {
   try {
     await rebuildSearchIndex();

@@ -1136,7 +1136,17 @@ function isDeviceInfoHeader(name: string): boolean {
 // ══════════════════════════════════════════════════════════════════════════════
 export async function clearDeviceCache(pageUrl: string): Promise<void> {
   const ck = `nbc:device:${CACHE_VERSION}:${pageUrl}`;
-  try { await redisSet(ck, null); } catch {} // overwrite with null = effectively cleared
+  memCache.delete(ck);
+  try { await redisSet(ck, null); } catch {}
+}
+
+// Clears the full-result cache for a query string.
+// Must be called on nocache=1 BEFORE getNotebookCheckDataFast — otherwise
+// the full-cache hit fires first and the nocache flag has no effect.
+export async function clearFullCache(query: string): Promise<void> {
+  const ck = `nbc:full:fast:${CACHE_VERSION}:${query.toLowerCase().trim()}`;
+  memCache.delete(ck);
+  try { await redisSet(ck, null); } catch {}
 }
 
 export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: string, signal?: AbortSignal): Promise<NBCDeviceData> {
