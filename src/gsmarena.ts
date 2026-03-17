@@ -16,10 +16,71 @@ import * as cheerio from 'cheerio';
 const _gsmaHttpsAgent = new (require('https').Agent)({ keepAlive: true, maxSockets: 50 });
 const _gsmaAxios = require('axios').create({ httpsAgent: _gsmaHttpsAgent, maxRedirects: 5, decompress: true });
 
-const cache = new Map<string, { data: any; time: number }>();
-const CACHE_TTL = 48 * 60 * 60 * 1000;
-function getCache(k: string) { const h = cache.get(k); return h && Date.now() - h.time < CACHE_TTL ? h.data : null; }
-function setCache(k: string, d: any) { cache.set(k, { data: d, time: Date.now() }); }
+// ── CACHE: mem-first, Redis fallback (same pattern as notebookcheck.ts) ───────
+const CACHE_TTL_MS  = 48 * 60 * 60 * 1000; // 48 h in ms  (mem TTL check)
+const CACHE_TTL_SEC = 48 * 60 * 60;         // 48 h in sec (Redis EX param)
+const MEM_CACHE_MAX = 200;
+
+const _memCache = new Map<string, { data: any; time: number }>();
+
+function _memEvict() {
+  if (_memCache.size < MEM_CACHE_MAX) return;
+  const evictCount = Math.floor(MEM_CACHE_MAX * 0.2);
+  const keys = [..._memCache.keys()];
+  for (let i = 0; i < evictCount; i++) _memCache.delete(keys[i]);
+}
+function _memGet(k: string): any | null {
+  const h = _memCache.get(k);
+  if (!h) return null;
+  if (Date.now() - h.time >= CACHE_TTL_MS) { _memCache.delete(k); return null; }
+  // LRU: move to end
+  _memCache.delete(k);
+  _memCache.set(k, h);
+  return h.data;
+}
+function _memSet(k: string, d: any) {
+  _memEvict();
+  _memCache.set(k, { data: d, time: Date.now() });
+}
+
+async function _redisGet(k: string): Promise<any | null> {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return null;
+  try {
+    const resp = await _gsmaAxios.get(`${url}/get/${encodeURIComponent(k)}`, {
+      headers: { Authorization: `Bearer ${token}` }, timeout: 20000,
+    });
+    const val = resp.data?.result;
+    return val ? JSON.parse(val) : null;
+  } catch { return null; }
+}
+
+async function _redisSet(k: string, d: any): Promise<void> {
+  const url   = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) return;
+  try {
+    await _gsmaAxios.post(
+      `${url}/pipeline`,
+      [['SET', k, JSON.stringify(d), 'EX', CACHE_TTL_SEC]],
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 25000 },
+    );
+  } catch { /* non-fatal */ }
+}
+
+async function getCache(k: string): Promise<any | null> {
+  const mem = _memGet(k);
+  if (mem !== null) return mem;
+  const red = await _redisGet(k);
+  if (red !== null) { _memSet(k, red); return red; }
+  return null;
+}
+
+function setCache(k: string, d: any): void {
+  _memSet(k, d);
+  _redisSet(k, d).catch(() => { /* non-fatal */ });
+}
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -89,7 +150,7 @@ export async function searchGSMArena(query: string): Promise<{ name: string; url
   const q = query.replace(/\+/g, ' plus').trim();
   const ck = `gsma:search:v3:${q.toLowerCase().trim()}`;
   query = q;
-  const cached = getCache(ck); if (cached) return cached;
+  const cached = await getCache(ck); if (cached) return cached;
 
   // Strategy A: HTML search — accurate, returns exact model matches
   try {
@@ -163,7 +224,7 @@ export async function searchGSMArena(query: string): Promise<{ name: string; url
 // ─────────────────────────────────────────────────────────────────────────────
 export async function scrapeGSMArenaDevice(url: string): Promise<any> {
   const ck = `gsma:device:v1:${url}`;
-  const cached = getCache(ck); if (cached) return cached;
+  const cached = await getCache(ck); if (cached) return cached;
 
   let html: string;
   try {
@@ -334,7 +395,7 @@ export async function scrapeGSMArenaDevice(url: string): Promise<any> {
 // ─────────────────────────────────────────────────────────────────────────────
 export async function getGSMArenaData(query: string): Promise<any> {
   const ck = `gsma:full:v2:${query.toLowerCase().trim()}`;
-  const cached = getCache(ck); if (cached) return cached;
+  const cached = await getCache(ck); if (cached) return cached;
 
   // Step 1: search (~0.5-2s with autocomplete)
   const results = await searchGSMArena(query);
