@@ -26,6 +26,22 @@ import * as cheerio from 'cheerio';
 //    • Case/housing section + aPic_ → 'device'  (hero + case hardware shots)
 //    • Camera/photo section + aPic_ → 'cameraSamples'  (safety net for captionless samples)
 //
+//  FIX 9 — Large-number test shots and heatmaps misclassified as device photos:
+//  ─────────────────────────────────────────────────────────────────────────────
+//  ROOT CAUSE (Xiaomi 17 Ultra / NBC test-sequence naming):
+//
+//  FIX 9a — Large asset-ID numbers (3+ trailing digits):
+//    NBC's internal test-shot naming sometimes uses 6-digit asset IDs instead of
+//    the standard 1-2 digit sequence (e.g. Xiaomi_17_Ultra_Test_Smartphone_134188).
+//    The old `_\d{1,2}$` pattern never matched, so these fell through to the
+//    default 'device' bucket.  Any trailing 3+ digit number is always a detail/angle
+//    shot (never a hero), so they now route to 'deviceAngles'.
+//
+//  FIX 9b — Heatmap images (thermal surface maps):
+//    Heatmap_Rueckseite.jpg / Heatmap_Vorderseite.jpg are NBC thermal heatmap
+//    overlays from their lab temperature measurements.  `^heatmap[_-]` now routes
+//    these to 'charts' instead of falling through to 'device'.
+//
 //  FIX 8 — Lender/partner logos and NBC shared folders leaking into images.device:
 //  ─────────────────────────────────────────────────────────────────────────────
 //  ROOT CAUSE (Xiaomi 17 Ultra / any review with a loan-provider):
@@ -2195,21 +2211,25 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
     // Screenshots
     if (/screenshot/i.test(filename)) return 'screenshots';
 
-    // Charts (GNSS, battery discharge plots) — standalone filenames not starting with Foto_
+    // Charts (GNSS, battery discharge plots, thermal heatmaps) — standalone filenames not starting with Foto_
     // Also catches: view.jpg (size comparison), comparison.jpg, etc.
+    // Heatmap_Rueckseite.jpg / Heatmap_Vorderseite.jpg — thermal surface maps (NBC lab test image)
     if (/\bgnss\b|(?<![a-z])chart(?![a-z])|^view\.jpg$|comparison/i.test(filename)) return 'charts';
+    if (/^heatmap[_\-]/i.test(filename)) return 'charts';
 
     // ── NUMBERED/ANGLED DEVICE PHOTOS ────────────────────────────────────────
     // NBC device review pages name device photos as:
-    //   csm_BRAND_DEVICE_N_HASH.jpg  → bare = "brand_device_n"
+    //   csm_BRAND_DEVICE_N_HASH.jpg           → bare = "brand_device_n"
     //   csm_BRAND_DEVICE_Smartphone_Test_N_HASH.jpg → bare = "brand_device_smartphone_test_n"
-    //   csm_BRAND_DEVICE_top_HASH.jpg → bare = "brand_device_top"
+    //   BRAND_DEVICE_Test_Smartphone_BIGNUM.webp → bare contains a large sequence number
+    //   csm_BRAND_DEVICE_top_HASH.jpg         → bare = "brand_device_top"
     //
     // Classification:
-    //   _1 suffix (first shot) → device (main hero/marketing shot)
-    //   _2+ suffix (subsequent shots) → deviceAngles (detail/angle views)
+    //   _1 suffix (first 1-2 digit shot) → device (main hero/marketing shot)
+    //   _2+ suffix (subsequent 1-2 digit shots) → deviceAngles (detail/angle views)
     //   _Smartphone_Test_1 → device (front-facing hero shot)
     //   _Smartphone_Test_2+ → deviceAngles (angle/port/button detail shots)
+    //   _BIGNUM (3+ digits, e.g. _134188) → always deviceAngles (NBC internal asset ID)
     //
     // This matches NBC editorial convention: the first image is always the main
     // product shot, subsequent numbered images are detail/angle views.
@@ -2218,6 +2238,8 @@ export async function scrapeNotebookCheckDevice(pageUrl: string, deviceName?: st
       const shotNum = numMatch ? parseInt(numMatch[1], 10) : 1;
       return shotNum <= 1 ? 'device' : 'deviceAngles';
     }
+    // Large asset-ID numbers (3+ digits trailing): always a detail/angle shot, never the hero
+    if (/^[a-z0-9]+(?:[_\-][a-z0-9]+)+[_\-]\d{3,}$/i.test(bare)) return 'deviceAngles';
     if (/_(top|bottom|left|right|front|back|side|angle)$/i.test(bare)) return 'deviceAngles';
 
     // NBC "Bild_" series (Samsung reviews and others):
