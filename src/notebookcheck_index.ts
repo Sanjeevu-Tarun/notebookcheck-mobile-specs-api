@@ -1294,7 +1294,7 @@ export async function resetCrawlLock(): Promise<void> {
 // Redis key: nbc:migrate:stats   — cumulative upgraded/noReview/errors counts
 //
 // Call: GET /api/index/migrate-review-urls?batch=200
-// Keep calling until the response contains "done": true
+// Keep calling until the response contains "done":true
 //
 
 const MIGRATE_CURSOR_KEY = 'nbc:migrate:cursor';
