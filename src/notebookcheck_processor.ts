@@ -855,7 +855,7 @@ export async function crawlSync(startPage = 1, maxPages = 40, delayMs = 600): Pr
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  READ FUNCTIONS
+//  READ-FUNCTIONS
 // ══════════════════════════════════════════════════════════════════════════════
 
 export async function getLastCrawlStats(): Promise<CrawlStats | null> {
