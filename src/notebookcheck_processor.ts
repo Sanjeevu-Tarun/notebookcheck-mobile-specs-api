@@ -586,7 +586,7 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
     const params = {
       q: `site:notebookcheck.net ${q} processor benchmarks specs`,
       format: 'json',
-      engines: 'google,bing,duckduckgo',
+      engines: 'google',   // google only — Bing blocks Render IPs, DDG rate-limits (per old comments)
       categories: 'general',
     };
     debugLog?.push({ step: 'searxng_request', base, params, timeMs: Date.now() });
@@ -627,15 +627,56 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
       const html = typeof resp.data === 'string' ? resp.data : '';
       const $ = require('cheerio').load(html);
       const items: ExternalItem[] = [];
-      $('a[href]').each((_: number, el: any) => {
-        const href = $(el).attr('href') || '';
-        const title = normStr($(el).text());
-        if (!href.includes('notebookcheck.net') && !href.startsWith('/')) return;
-        const fullUrl = href.startsWith('http') ? href
-          : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
-        if (!fullUrl || !title) return;
-        items.push({ url: fullUrl, title });
-      });
+
+      // NBC search results live in .tx-indexedsearch-res > li > a, or .result a
+      // Fallback: any link matching the NBC numeric page ID pattern with "processor"/"benchmark"/"soc" in the URL or title
+      const resultSelectors = [
+        '.tx-indexedsearch-res a[href]',
+        '.searchResultItem a[href]',
+        'li.result a[href]',
+        '.search_result a[href]',
+        'h3.tx-indexedsearch-res-title a[href]',
+      ];
+
+      let foundViaSelector = false;
+      for (const sel of resultSelectors) {
+        const els = $(sel);
+        if (els.length > 0) {
+          els.each((_: number, el: any) => {
+            const href = $(el).attr('href') || '';
+            const title = normStr($(el).text());
+            const fullUrl = href.startsWith('http') ? href
+              : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+            if (fullUrl && title && title.length > 2) items.push({ url: fullUrl, title });
+          });
+          if (items.length > 0) { foundViaSelector = true; break; }
+        }
+      }
+
+      // Fallback: grab all links but only keep ones that look like NBC spec/processor pages
+      if (!foundViaSelector) {
+        $('a[href]').each((_: number, el: any) => {
+          const href = $(el).attr('href') || '';
+          const title = normStr($(el).text());
+          const fullUrl = href.startsWith('http') ? href
+            : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+          if (!fullUrl || !title || title.length < 3) return;
+          if (!fullUrl.includes('notebookcheck.net')) return;
+          // Only include links that look like processor/SoC spec pages
+          const ul = fullUrl.toLowerCase();
+          const tl = title.toLowerCase();
+          if (
+            /benchmarks-and-specs/i.test(ul) ||
+            (/processor/i.test(ul) && /\.\d{4,}\./.test(ul)) ||
+            (/soc/i.test(ul) && /\.\d{4,}\./.test(ul)) ||
+            (/(snapdragon|dimensity|exynos|kirin|tensor|helio|apple\s*[am]\d)/i.test(tl) && /\.\d{4,}\./.test(ul))
+          ) {
+            items.push({ url: fullUrl, title });
+          }
+        });
+      }
+
+      debugLog?.push({ step: 'nbc_direct_search_items', foundViaSelector, count: items.length, sample: items.slice(0,5).map(i => ({url: i.url, title: i.title})) });
       return items;
     } catch (e) {
       if ((e as Error).name === 'AbortError') throw e;
@@ -648,6 +689,7 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
   // If the primary query returns no usable results, try the original query.
   // This handles cases where brand normalization makes the query worse
   // (e.g. a misspelled brand that NBC actually indexes as-is).
+  // SearXNG with site: operator
   const tryQuery = async (q: string): Promise<ExternalItem[]> => {
     try {
       return await doSearch(q);
@@ -658,12 +700,40 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
     }
   };
 
+  // SearXNG without site: — some engines ignore or break on it
+  const tryQueryNoSite = async (q: string): Promise<ExternalItem[]> => {
+    const params = {
+      q: `${q} notebookcheck processor benchmarks specs`,
+      format: 'json',
+      engines: 'google',
+      categories: 'general',
+    };
+    debugLog?.push({ step: 'searxng_no_site_request', params });
+    try {
+      const resp = await procAxios.get(`${base}/search`, {
+        params,
+        headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
+        timeout: 25000,
+        signal,
+      });
+      const results = (resp.data?.results || []) as ExternalItem[];
+      debugLog?.push({ step: 'searxng_no_site_response', rawCount: results.length, rawResults: results.slice(0,5).map((r:any)=>({url:r.url,title:r.title})) });
+      return results;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      debugLog?.push({ step: 'searxng_no_site_error', error: (e as Error).message });
+      return [];
+    }
+  };
+
   try {
     debugLog?.push({ step: 'circuit_check', base, open: false });
+
+    // Attempt 1: SearXNG with site: operator, google engine
     let items = await tryQuery(searchQuery);
     debugLog?.push({ step: 'primary_query_done', query: searchQuery, itemsCount: items.length });
 
-    // If primary returned nothing AND nq !== oq, try oq as fallback
+    // Attempt 2: normalized query fallback
     if (items.length === 0 && nq !== oq) {
       debugLog?.push({ step: 'fallback_query', primary: searchQuery, fallback: oq });
       log('debug', 'proc.searxng.fallback', { primary: searchQuery, fallback: oq });
@@ -671,7 +741,14 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
       debugLog?.push({ step: 'fallback_query_done', itemsCount: items.length });
     }
 
-    // Last resort: if SearXNG returned nothing, scrape NBC's own search page directly
+    // Attempt 3: SearXNG without site: operator (site: can break google on some SearXNG configs)
+    if (items.length === 0) {
+      debugLog?.push({ step: 'no_site_query_attempt', query: searchQuery });
+      items = await tryQueryNoSite(searchQuery);
+      debugLog?.push({ step: 'no_site_query_done', itemsCount: items.length });
+    }
+
+    // Attempt 4: NBC direct search — scrape NBC's own search page, no third-party dependency
     if (items.length === 0) {
       debugLog?.push({ step: 'nbc_direct_search_attempt', query: searchQuery });
       log('debug', 'proc.nbc_direct_search.attempt', { query: searchQuery });
