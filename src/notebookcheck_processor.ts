@@ -555,7 +555,7 @@ function scoreProcCandidate(title: string, url: string, nq: string, oq: string):
 export async function searchProcViaSearXNG(nq: string, oq: string, signal?: AbortSignal): Promise<ProcessorSearchResult[]> {
   const seen = new Set<string>();
   const all: ProcessorSearchResult[] = [];
-  const base = 'https://searxng-notebookcheck.onrender.com';
+  const base = process.env.SEARXNG_URL ?? 'https://searxng-notebookcheck.onrender.com';
 
   if (procCircuitIsOpen(base)) return [];
 
