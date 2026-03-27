@@ -583,16 +583,52 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
       params: {
         q: `site:notebookcheck.net ${q} processor benchmarks specs`,
         format: 'json',
-        // No engines override — let settings.yml decide (Google only).
-        // Hardcoding engines here bypassed the settings.yml config and forced
-        // duckduckgo+bing even after we fixed settings.yml.
+        engines: 'google,bing,duckduckgo',  // explicit — don't rely on settings.yml defaults
         categories: 'general',
       },
       headers: { 'User-Agent': procRandomUA(), 'Accept': 'application/json' },
-      timeout: 12000,  // 12s — allows for Render free-tier cold start (can take 10-30s)
+      timeout: 25000,  // 25s — Render free-tier cold start can take 10-30s; 12s was too short
       signal,
     });
     return (resp.data?.results || []) as ExternalItem[];
+  };
+
+  // ── NBC DIRECT SEARCH FALLBACK ─────────────────────────────────────────────
+  // When SearXNG is unavailable (cold start timeout, circuit open, rate-limit),
+  // scrape NBC's own search page directly as a last resort.
+  // URL: https://www.notebookcheck.net/Search.8242.0.html?word=<query>
+  // Returns HTML with links to matching NBC pages — no third-party dependency.
+  const doNbcDirectSearch = async (q: string): Promise<ExternalItem[]> => {
+    try {
+      const searchUrl = `https://www.notebookcheck.net/Search.8242.0.html`;
+      const resp = await procAxios.get(searchUrl, {
+        params: { word: q },
+        headers: {
+          'User-Agent': procRandomUA(),
+          'Accept': 'text/html',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        timeout: 10000,
+        signal,
+      });
+      const html = typeof resp.data === 'string' ? resp.data : '';
+      const $ = require('cheerio').load(html);
+      const items: ExternalItem[] = [];
+      $('a[href]').each((_: number, el: any) => {
+        const href = $(el).attr('href') || '';
+        const title = normStr($(el).text());
+        if (!href.includes('notebookcheck.net') && !href.startsWith('/')) return;
+        const fullUrl = href.startsWith('http') ? href
+          : href.startsWith('/') ? 'https://www.notebookcheck.net' + href : '';
+        if (!fullUrl || !title) return;
+        items.push({ url: fullUrl, title });
+      });
+      return items;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      log('debug', 'proc.nbc_direct_search.failed', { q, err: (e as Error).message });
+      return [];
+    }
   };
 
   // ── FALLBACK QUERY ─────────────────────────────────────────────────────────
@@ -615,6 +651,13 @@ export async function searchProcViaSearXNG(nq: string, oq: string, signal?: Abor
     if (items.length === 0 && nq !== oq) {
       log('debug', 'proc.searxng.fallback', { primary: searchQuery, fallback: oq });
       items = await tryQuery(oq);
+    }
+
+    // Last resort: if SearXNG returned nothing, scrape NBC's own search page directly
+    if (items.length === 0) {
+      log('debug', 'proc.nbc_direct_search.attempt', { query: searchQuery });
+      items = await doNbcDirectSearch(nq !== oq ? nq : oq);
+      if (items.length === 0 && nq !== oq) items = await doNbcDirectSearch(oq);
     }
 
     procCircuitRecordSuccess(base);
