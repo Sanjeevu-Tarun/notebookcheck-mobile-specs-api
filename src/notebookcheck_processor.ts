@@ -525,12 +525,16 @@ function scoreProcCandidate(title: string, url: string, nq: string, oq: string):
   // Reject if the URL is clearly a phone review page
   if (/smartphone-review|phone-review|tablet-review/i.test(u)) return -1;
 
-  const qWords = q.split(/\s+/).filter(w => w.length > 0);
+  const nqWords = q.split(/\s+/).filter(w => w.length > 0);
+  // oq words for fallback — PROC_ALIASES expands e.g. "snapdragon 8 elite" → "qualcomm snapdragon 8 elite",
+  // but some NBC titles/snippets omit the brand name, so the expanded nq fails the all-words check
+  // even though the original query matches fine.  Accept if EITHER set matches.
+  const oqWords = oq.split(/\s+/).filter(w => w.length > 0);
   const urlSlug = (u.split('/').pop() || '').replace(/\.\d+\.\d+\.html$/, '').replace(/-/g, ' ').toLowerCase();
   const combined = t + ' ' + urlSlug;
 
-  // All query words must appear somewhere in title or URL slug
-  if (!qWords.every(w => combined.includes(w))) return -1;
+  // All query words must appear somewhere in title or URL slug (nq OR oq)
+  if (!nqWords.every(w => combined.includes(w)) && !oqWords.every(w => combined.includes(w))) return -1;
 
   let score = 400;
 

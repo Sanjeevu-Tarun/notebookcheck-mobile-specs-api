@@ -850,18 +850,22 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     'https://searxng-notebookcheck.onrender.com',
   ];
 
-  // Fire two queries in parallel when nq differs from oq
-  const queries = [oq, ...(nq !== oq ? [nq] : [])];
-  
-  debugLog.push({ step: 'queries', queries, queryCount: queries.length });
+  // Single query strategy — previously fired oq+nq in parallel against google+bing+duckduckgo.
+  // Problems: Bing blocks Render IPs (timeouts), DDG rate-limits shared IPs, and 2 parallel
+  // requests cause CPU contention on the Render free-tier container.
+  // Fix: one query, google only. Use nq (brand-expanded) when it differs from oq, fall back
+  // to oq if nq returns nothing.
+  const searchQuery = nq !== oq ? nq : oq;
+
+  debugLog.push({ step: 'queries', searchQuery, nq, oq });
 
   const doSearch = async (base: string, q: string) => {
     const searchUrl = `${base}/search`;
-    const params = { 
-      q: `site:notebookcheck.net ${q} review`, 
-      format: 'json', 
-      engines: 'google,bing,duckduckgo', 
-      categories: 'general' 
+    const params = {
+      q: `site:notebookcheck.net ${q} review`,
+      format: 'json',
+      engines: 'google',   // google only — Bing blocks Render IPs, DDG rate-limits shared IPs
+      categories: 'general',
     };
     
     debugLog.push({ step: 'request', base, query: q, fullQuery: params.q });
@@ -900,24 +904,26 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
     debugLog.push({ step: 'trying_instance', base });
 
     try {
-      const responses = await Promise.all(queries.map(q => doSearch(base, q)));
-      const totalResults = responses.reduce((sum, r) => sum + r.length, 0);
-      
-      debugLog.push({ 
-        step: 'parallel_results',
-        base, 
-        totalRawResults: totalResults,
-        perQuery: responses.map((r, i) => ({ query: queries[i], count: r.length }))
-      });
-      
+      // Single query with oq fallback — no parallel requests
+      let rawItems = await doSearch(base, searchQuery);
+      debugLog.push({ step: 'primary_query_done', query: searchQuery, rawCount: rawItems.length });
+
+      if (rawItems.length === 0 && nq !== oq) {
+        debugLog.push({ step: 'fallback_query', primary: searchQuery, fallback: oq });
+        rawItems = await doSearch(base, oq);
+        debugLog.push({ step: 'fallback_query_done', rawCount: rawItems.length });
+      }
+
+      const totalResults = rawItems.length;
+
       if (totalResults > 0) {
         circuitRecordSuccess(base);
-        
+
         const all: SearchResult[] = [];
         let droppedCount = 0;
         let dropReasons: Record<string, number> = {};
-        
-        for (const items of responses) {
+
+        for (const items of [rawItems]) {
           for (const item of items) {
             const url   = (item.url || '').trim();
             const title = (item.title || '').trim();
@@ -979,7 +985,7 @@ export async function searchViaSearXNG(nq: string, oq: string, signal?: AbortSig
         
         return all;
       } else {
-        debugLog.push({ step: 'zero_raw_results', base, queries });
+        debugLog.push({ step: 'zero_raw_results', base, searchQuery });
       }
     } catch (e) {
       debugLog.push({ 
