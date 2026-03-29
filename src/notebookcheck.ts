@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
+import { fetchWithCF } from './flaresolverr';
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK SCRAPER - FIXED IMAGE CLASSIFICATION
@@ -364,8 +365,8 @@ const CACHE_VERSION = (() => {
   return `s${h.toString(36)}`; // e.g. "s2k4m9vf" — stable across restarts
 })();
 
-const CACHE_TTL     = 48 * 60 * 60 * 1000; // 48 h in ms  (mem cache TTL check)
-const CACHE_TTL_SEC = 48 * 60 * 60;         // 48 h in sec (Redis EX param)
+const CACHE_TTL     = Infinity; // mem cache never expires — Redis is source of truth
+// CACHE_TTL_SEC removed: device cache is now permanent (no EX) so data survives forever
 
 // ── CIRCUIT BREAKER FOR EXTERNAL INSTANCES ───────────────────────────────────
 // FIX: previously unhealthy SearXNG instances were retried on every request.
@@ -411,7 +412,7 @@ function memEvict(): void {
 function memGet(k: string): unknown | null {
   const h = memCache.get(k);
   if (!h) return null;
-  if (Date.now() - h.time >= CACHE_TTL) { memCache.delete(k); return null; }
+  // No TTL expiry — Redis is persistent; mem cache is a hot-path shortcut only
   // FIX C2: true LRU — re-insert to move this key to the end of the Map so the
   // eviction pass (which deletes from the front) always evicts least-recently-used.
   memCache.delete(k);
@@ -455,7 +456,7 @@ async function redisSet(k: string, d: unknown): Promise<void> {
     // serverless regularly exceeds 8s, silently dropping every cache write.
     await sharedAxios.post(
       `${url}/pipeline`,
-      [['SET', k, JSON.stringify(d), 'EX', CACHE_TTL_SEC]],
+      [['SET', k, JSON.stringify(d)]],  // no EX — device cache is permanent
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 25000 },
     );
   } catch (e) { log('warn', 'redis.set failed', { key: k, err: (e as Error).message }); }
@@ -530,7 +531,14 @@ async function fetchUrl(url: string, timeoutMs = 5000, extraHeaders: Record<stri
       const isLast = i === retries;
       const status = (e as AxiosError)?.response?.status;
       if ((e as Error).name === 'AbortError') throw e;
-      if (status && status >= 400 && status < 500) throw e;
+      // On 403/4xx: try FlareSolverr before giving up — NBC blocks plain requests with Cloudflare
+      if (status === 403 || (status && status >= 400 && status < 500)) {
+        try {
+          return await fetchWithCF(url);
+        } catch (cfErr: unknown) {
+          throw new Error(`Direct 403 + FlareSolverr failed: ${(cfErr as Error).message}`);
+        }
+      }
       if (isLast) throw e;
       await new Promise(res => setTimeout(res, 200 * Math.pow(2, i)));
     } finally {

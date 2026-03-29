@@ -1,5 +1,6 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
+import { fetchWithCF } from './flaresolverr';
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK REVIEW INDEX — VERCEL SERVERLESS EDITION
@@ -89,10 +90,11 @@ async function rGet(k: string): Promise<unknown> {
   return JSON.parse(val);
 }
 
-async function rSet(k: string, v: unknown, ttl = 86400): Promise<void> {
+async function rSet(k: string, v: unknown, ttl?: number): Promise<void> {
   const { url, token } = rBase();
+  const cmd = ttl ? ['SET', k, JSON.stringify(v), 'EX', ttl] : ['SET', k, JSON.stringify(v)];
   await _rax.post(`${url}/pipeline`,
-    [['SET', k, JSON.stringify(v), 'EX', ttl]],
+    [cmd],
     { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } },
   );
 }
@@ -296,7 +298,15 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
       });
       return typeof data === 'string' ? data : JSON.stringify(data);
     } catch (e: any) {
-      if (e?.response?.status >= 400 && e?.response?.status < 500) throw e;
+      const status = e?.response?.status;
+      // On 403/4xx: fall back to FlareSolverr immediately — no point retrying plain
+      if (status === 403 || (status && status >= 400 && status < 500)) {
+        try {
+          return await fetchWithCF(url);
+        } catch (cfErr: any) {
+          throw new Error(`Direct ${status} + FlareSolverr failed: ${cfErr.message}`);
+        }
+      }
       if (i === 2) throw e;
       await new Promise(r => setTimeout(r, 600 * (i + 1)));
     }
@@ -317,7 +327,8 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
 // Result is cached in Redis (nbc:review_resolve:URL) with a 7-day TTL to avoid
 // refetching the library page on every crawl.
 
-const RESOLVE_TTL = 7 * 24 * 3600; // 7 days
+// RESOLVE_TTL removed — resolve cache is now permanent so crawl data survives forever.
+// Use rSetPermanent for resolve entries.
 
 export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
   const ck = `nbc:review_resolve:${libraryUrl}`;
@@ -421,7 +432,7 @@ export async function resolveToReviewUrl(libraryUrl: string): Promise<string> {
   }
 
   const result = reviewUrl ?? libraryUrl;
-  await rSet(ck, result, RESOLVE_TTL);
+  await rSetPermanent(ck, result); // permanent — resolve cache never expires
   return result;
 }
 

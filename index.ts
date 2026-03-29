@@ -1775,7 +1775,8 @@ app.get('/recrawl', (_, res) => {
       </div>
     </div>
   </div>
-  <button class="btn btn-plain" onclick="doResolve()" id="btnResolve">1. Resolve</button>
+  <button class="btn btn-plain" onclick="doResolve(false)" id="btnResolve">1. Resolve (cached)</button>
+  <button class="btn btn-plain" onclick="doResolve(true)" id="btnForceResolve" title="Wipes resolve cache — slow, only needed if NBC URLs changed">1b. Force Re-resolve</button>
   <button class="btn btn-stop" onclick="stopResolve()" id="btnStopResolve" style="display:none">■ Stop</button>
   <button class="btn btn-plain" onclick="doPurge()" id="btnPurge">2. Purge dupes</button>
   <button class="btn btn-plain" onclick="doRebuild()" id="btnRebuild">3. Rebuild index</button>
@@ -1965,21 +1966,22 @@ function stopC() { cStop = true; logLine('logC', 'stop requested…', 'warn'); }
 let resolveStop = false;
 function stopResolve() { resolveStop = true; }
 
-async function doResolve() {
+async function doResolve(forceWipe = false) {
   resolveStop = false;
-  const btn = document.getElementById('btnResolve');
+  const btn = document.getElementById(forceWipe ? 'btnForceResolve' : 'btnResolve');
   btn.disabled = true;
   document.getElementById('btnStopResolve').style.display = 'inline-flex';
   document.getElementById('postmsg').textContent = '';
   let offset = 0, totalResolved = 0, total = 0;
 
-  // First: clear stale resolve caches so we refetch fresh from NBC
-  document.getElementById('resolveLabel').textContent = 'clearing stale cache…';
-  try {
-    await fetch('/api/index/recover-review-urls?clearcache=1&norun=1');
-  } catch(e) {}
-
-  document.getElementById('resolveLabel').textContent = 'resolving…';
+  if (forceWipe) {
+    // Force Re-resolve: wipe stale cache so NBC pages are re-fetched live.
+    // This is SLOW — only use when review URLs have changed on NBC.
+    document.getElementById('resolveLabel').textContent = 'clearing resolve cache…';
+    try { await fetch('/api/index/recover-review-urls?clearcache=1&norun=1'); } catch(e) {}
+  }
+  // Normal resolve uses the permanent cache — fast, no live NBC fetches needed.
+  document.getElementById('resolveLabel').textContent = forceWipe ? 'force-resolving (live NBC fetches)…' : 'resolving…';
 
   while (!resolveStop) {
     try {
@@ -2014,6 +2016,7 @@ async function doResolve() {
   }
 
   btn.disabled = false;
+  document.getElementById('btnForceResolve').disabled = false;
   document.getElementById('btnStopResolve').style.display = 'none';
 }
 
