@@ -1,6 +1,5 @@
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { fetchWithCF } from './flaresolverr';
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK REVIEW INDEX — VERCEL SERVERLESS EDITION
@@ -299,14 +298,7 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
       return typeof data === 'string' ? data : JSON.stringify(data);
     } catch (e: any) {
       const status = e?.response?.status;
-      // On 403/4xx: fall back to FlareSolverr immediately — no point retrying plain
-      if (status === 403 || (status && status >= 400 && status < 500)) {
-        try {
-          return await fetchWithCF(url);
-        } catch (cfErr: any) {
-          throw new Error(`Direct ${status} + FlareSolverr failed: ${cfErr.message}`);
-        }
-      }
+
       if (i === 2) throw e;
       await new Promise(r => setTimeout(r, 600 * (i + 1)));
     }

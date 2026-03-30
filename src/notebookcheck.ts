@@ -1,6 +1,5 @@
 import axios, { AxiosError } from 'axios';
 import * as cheerio from 'cheerio';
-import { fetchWithCF } from './flaresolverr';
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTEBOOKCHECK SCRAPER - FIXED IMAGE CLASSIFICATION
@@ -531,14 +530,7 @@ async function fetchUrl(url: string, timeoutMs = 5000, extraHeaders: Record<stri
       const isLast = i === retries;
       const status = (e as AxiosError)?.response?.status;
       if ((e as Error).name === 'AbortError') throw e;
-      // On 403/4xx: try FlareSolverr before giving up — NBC blocks plain requests with Cloudflare
-      if (status === 403 || (status && status >= 400 && status < 500)) {
-        try {
-          return await fetchWithCF(url);
-        } catch (cfErr: unknown) {
-          throw new Error(`Direct 403 + FlareSolverr failed: ${(cfErr as Error).message}`);
-        }
-      }
+
       if (isLast) throw e;
       await new Promise(res => setTimeout(res, 200 * Math.pow(2, i)));
     } finally {
