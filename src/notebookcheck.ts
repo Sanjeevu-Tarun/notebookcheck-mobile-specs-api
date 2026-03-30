@@ -540,6 +540,19 @@ async function fetchUrl(url: string, timeoutMs = 5000, extraHeaders: Record<stri
       const status = (e as AxiosError)?.response?.status;
       if ((e as Error).name === 'AbortError') throw e;
 
+      // On 403: notebookcheck.net is blocking this server's IP (Cloudflare/WAF).
+      // Retrying the same IP will keep getting 403 — use FlareSolverr immediately.
+      if (status === 403) {
+        try {
+          const { fetchWithCF } = await import('./flaresolverr');
+          log('info', 'fetchUrl.403_cf_fallback', { url });
+          return await fetchWithCF(url);
+        } catch (cfErr: unknown) {
+          log('warn', 'fetchUrl.cf_failed', { url, err: (cfErr as Error)?.message });
+        }
+        throw e; // CF also failed — surface original 403
+      }
+
       if (isLast) throw e;
       await new Promise(res => setTimeout(res, 200 * Math.pow(2, i)));
     } finally {

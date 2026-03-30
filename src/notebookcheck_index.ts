@@ -308,6 +308,19 @@ async function fetchHtml(url: string, ms = 15000): Promise<string> {
     } catch (e: any) {
       const status = e?.response?.status;
 
+      // On 403: notebookcheck.net is blocking this server's IP (Cloudflare/WAF).
+      // Retrying the same IP will keep getting 403 — use FlareSolverr immediately.
+      if (status === 403) {
+        try {
+          const { fetchWithCF } = await import('./flaresolverr');
+          console.info(`[fetchHtml] 403 on ${url} — falling back to FlareSolverr`);
+          return await fetchWithCF(url);
+        } catch (cfErr: any) {
+          console.warn(`[fetchHtml] FlareSolverr also failed for ${url}: ${cfErr?.message}`);
+        }
+        throw e; // CF also failed — surface original 403
+      }
+
       if (i === 2) throw e;
       await new Promise(r => setTimeout(r, 600 * (i + 1)));
     }
