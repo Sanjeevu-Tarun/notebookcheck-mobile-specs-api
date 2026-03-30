@@ -1529,15 +1529,22 @@ app.get('/api/debug/redis', async (req, res) => {
 module.exports = app;
 
 // ── STARTUP WARM-UP ──────────────────────────────────────────────────────────
-// Fire-and-forget ping to SearXNG on Render free tier so the cold start
-// happens at deploy/restart time, not on the first real user request.
-// The 30 s timeout is generous on purpose — we want it to actually wake up.
+// Fire-and-forget pings to Render free-tier services so cold starts happen at
+// deploy/restart time, not during the first real user request.
 (async () => {
   try {
     const axiosWarmup = (await import('axios')).default;
     await axiosWarmup.get(`${SEARXNG_INSTANCE}/healthz`, { timeout: 30000 });
   } catch {
-    // Silently ignore — best-effort. First real request will retry with 12 s timeout.
+    // Silently ignore — best-effort.
+  }
+
+  // Also warm up flaskresolver so it's ready when NBC returns a 403
+  try {
+    const { pingFlaskResolver } = await import('./src/flaresolverr');
+    await pingFlaskResolver();
+  } catch {
+    // Silently ignore — best-effort.
   }
 })();
 
