@@ -2,7 +2,7 @@ import axios from 'axios';
 
 // Your flaskresolver instance on Render
 // Set FLARESOLVERR_URL=https://flaskresolver.onrender.com in your .env / Vercel env vars
-const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL || 'https://flaskresolver.onrender.com';
+const FLARESOLVERR_URL = process.env.FLARESOLVERR_URL
 
 // ── TIMEOUT SETTINGS ─────────────────────────────────────────────────────────
 // flaskresolver uses lightweight Python requests (no Chrome) → much faster and
