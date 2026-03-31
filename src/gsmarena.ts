@@ -373,6 +373,67 @@ export async function scrapeGSMArenaDevice(url: string): Promise<any> {
   });
   data.images = [...new Set(data.images)].slice(0, 20);
 
+  // ── OFFICIAL PRESS IMAGES + COLOR VARIANTS from Pictures Page ────────────
+  // Build pictures page URL from the device slug/ID
+  // e.g. https://www.gsmarena.com/samsung_galaxy_s25_ultra-12771.php
+  //   → https://www.gsmarena.com/samsung_galaxy_s25_ultra-pictures-12771.php
+  const slugMatch = url.match(/\/([a-z0-9_]+-(\d+))\.php$/i);
+  const deviceId  = slugMatch ? slugMatch[2] : null;
+  const deviceSlug = slugMatch ? slugMatch[1] : null;
+  const picturesPageUrl = deviceSlug && deviceId
+    ? `https://www.gsmarena.com/${deviceSlug}-pictures-${deviceId}.php`
+    : null;
+
+  data.officialImages  = [] as string[];
+  data.colorVariants   = [] as Array<{ colorName: string; imageUrl: string; isDefault: boolean }>;
+  data.picturesPageUrl = picturesPageUrl || null;
+
+  if (picturesPageUrl) {
+    try {
+      const picHtml = await fetchGSMA(picturesPageUrl, 5000);
+      const $p = cheerio.load(picHtml);
+
+      // ── All /vv/pics/ full-res press renders ─────────────────────────────
+      $p('img[src*="/vv/pics/"]').each((_, el) => {
+        const src = $p(el).attr('src') || '';
+        if (src && !data.officialImages.includes(src)) data.officialImages.push(src);
+      });
+
+      // ── Color variants from the 3D model viewer section ──────────────────
+      // GSMArena renders: <li data-seo-image="URL">ColorName</li>
+      // The 3D model section is inside #model-3d or ul.color-list
+      $p('ul.color-list li, #model-3d li, [class*="color-list"] li').each((idx, el) => {
+        const $li  = $p(el);
+        const imgUrl    = ($li.attr('data-seo-image') || $li.attr('data-image') || '').trim();
+        const colorName = ($li.attr('title') || $li.find('span').text() || $li.text()).trim();
+        if (colorName && imgUrl && imgUrl.startsWith('http')) {
+          data.colorVariants.push({ colorName, imageUrl: imgUrl, isDefault: idx === 0 });
+        }
+      });
+
+      // ── Fallback: parse color names from inline JS, pair with officialImages ──
+      if (data.colorVariants.length === 0 && data.officialImages.length > 0) {
+        const scriptBlob = $p('script').map((_, el) => $p(el).html() || '').get().join('\n');
+        // GSMArena embeds: var colors = ["Titanium Black","Titanium Gray",...];
+        const colorsMatch = scriptBlob.match(/(?:var\s+colors|"colors")\s*[=:]\s*\[([^\]]+)\]/);
+        if (colorsMatch) {
+          const names = Array.from(colorsMatch[1].matchAll(/"([^"]+)"/g)).map(m => m[1]);
+          names.forEach((name, idx) => {
+            const imgUrl = data.officialImages[idx] || data.officialImages[0] || '';
+            if (name && imgUrl) {
+              data.colorVariants.push({ colorName: name, imageUrl: imgUrl, isDefault: idx === 0 });
+            }
+          });
+        }
+      }
+    } catch { /* pictures page unavailable — silent */ }
+  }
+
+  // If pictures page gave us nothing, fall back to /vv/pics/ images already on specs page
+  if (data.officialImages.length === 0) {
+    data.officialImages = data.images.filter(u => u.includes('/vv/pics/'));
+  }
+
   // ── PROS/CONS (from review page if available) ─────────────────────────
   // GSMArena puts pros/cons on the review page, not specs page
   // We grab them from the specs page verdict section if present
