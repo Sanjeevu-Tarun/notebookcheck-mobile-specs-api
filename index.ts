@@ -49,7 +49,7 @@ app.get('/api/health', (_, res) => res.json({ status: 'ok', version }));
 
 // Shared query validator — rejects missing, non-string, or oversized queries
 // Extract the raw ?q= value from the URL BEFORE Express decodes it.
-//
+// dont add the searxng in uptimerobot frequently it may get blocked
 // The "+" ambiguity in query strings:
 //   - Form-encoded spaces:  "pixel 8 pro" → "pixel+8+pro"  (+ = space)
 //   - Device name suffix:   "samsung s25+" → "samsung%20s25+"  (+ = literal plus)
