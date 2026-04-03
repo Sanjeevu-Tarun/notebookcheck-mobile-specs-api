@@ -1576,7 +1576,7 @@ app.get('/api/debug/redis-force-unlock', async (req, res) => {
       deleted: keys,
       lockStillExists: lockVal !== null,
       lockValue: lockVal,
-      hint: lockVal === null ? '✅ Lock is gone — safe to crawl now' : '❌ Lock still exists and needed to be unlocked first',
+      hint: lockVal === null ? '✅ Lock is gone and unlocked — safe to crawl now' : '❌ Lock still exists and needed to be unlocked first',
     });
   } catch (e: any) {
     return res.status(500).json({ success: false, error: e.message });
