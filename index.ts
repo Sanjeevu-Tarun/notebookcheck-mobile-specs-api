@@ -1528,6 +1528,19 @@ app.get('/api/debug/redis', async (req, res) => {
 
 module.exports = app;
 
+// ── LOCAL DEV SERVER ──────────────────────────────────────────────────────────
+// On Vercel, module.exports = app is enough — Vercel calls it as a handler.
+// Locally (pnpm dev / ts-node), there is no Vercel runtime to call listen(),
+// so we do it ourselves when this file is the entry point.
+if (require.main === module) {
+  const PORT = Number(process.env.PORT) || 3000;
+  app.listen(PORT, () => {
+    console.log(`\n🚀  NotebookCheck API running at http://localhost:${PORT}`);
+    console.log(`    GET http://localhost:${PORT}/api/health`);
+    console.log(`    GET http://localhost:${PORT}/api/phone?q=samsung+s25+ultra\n`);
+  });
+}
+
 // ── STARTUP WARM-UP ──────────────────────────────────────────────────────────
 // Fire-and-forget pings to Render free-tier services so cold starts happen at
 // deploy/restart time, not during the first real user request.
