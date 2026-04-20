@@ -16,6 +16,36 @@
 
 ---
 
+## Table of Contents
+
+- [Why This API?](#why-this-api)
+- [Features](#features)
+- [Quick Start](#quick-start)
+  - [Deploy to Vercel](#deploy-to-vercel)
+  - [Sample JSON Output](#sample-json-output)
+- [API Reference](#api-reference)
+  - [Device Data](#device-data)
+  - [Processor / SoC](#processor--soc)
+  - [Search & Suggestions](#search--suggestions)
+  - [Scrape by URL](#scrape-by-url)
+  - [Debug & Timing](#debug--timing)
+  - [Crawl Index](#crawl-index)
+  - [Browser Dashboards](#browser-dashboards)
+  - [Error Schema](#error-schema)
+- [Image Buckets](#image-buckets)
+- [Benchmark Categories](#benchmark-categories)
+- [Cloudflare Bypass Architecture](#cloudflare-bypass-architecture)
+- [Caching](#caching)
+- [Environment Variables](#environment-variables)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Use Cases](#use-cases)
+- [Contributing](#contributing)
+- [Disclaimer](#️-disclaimer)
+- [License](#license)
+
+---
+
 ## Why This API?
 
 NotebookCheck is the most thorough independent smartphone review site on the web — oscilloscope PWM measurements, Calman colour calibration plots, 10-category benchmark suites, per-lens camera specs with sensor sizes and OIS types, structured pros/cons, and hundreds of classified camera samples per review. No other site publishes this depth of data in a machine-readable form.
@@ -45,6 +75,7 @@ The problem: NotebookCheck sits behind Cloudflare WAF, serves everything as HTML
 | NBC TYPO3 POST search (direct, no SearXNG dependency) | ✅ | ❌ |
 | GSMArena suggestions for autocomplete | ✅ | ❌ |
 | Interactive browser dashboards (/migrate, /recover, /recrawl) | ✅ | ❌ |
+| Fully CORS-enabled for direct frontend consumption | ✅ | ❌ |
 | Serverless — no infrastructure to manage | ✅ | ❌ |
 
 ---
@@ -57,11 +88,14 @@ The problem: NotebookCheck sits behind Cloudflare WAF, serves everything as HTML
 git clone https://github.com/Sanjeevu-Tarun/notebookchecker
 cd notebookchecker
 npm install
+cp .env.example .env        # copy env template — fill in keys before first run
 npm run dev
 # → http://localhost:3000
 ```
 
 > `npm run dev` starts a local Express server via `ts-node`. On Vercel, `module.exports = app` is used directly as the serverless handler — same codebase, zero config differences.
+
+> **CORS:** The API is fully CORS-enabled out of the box. Hit any endpoint directly from a browser, a frontend app, or a mobile WebView — no proxy required.
 
 ### Deploy to Vercel
 
@@ -78,9 +112,12 @@ vercel deploy
 
 ---
 
-## Sample JSON Output
+### Sample JSON Output
 
 This is real output from the API for the **Vivo X300 Pro**. Not mocked — not fabricated.
+
+<details>
+<summary><strong>▶ Expand full Vivo X300 Pro JSON response</strong></summary>
 
 ```json
 {
@@ -300,6 +337,8 @@ This is real output from the API for the **Vivo X300 Pro**. Not mocked — not f
 
 > The snippet above is abbreviated for readability. The full Vivo X300 Pro response includes 30+ GPU benchmark rows across GFXBench / 3DMark / BaseMark, 16 OS screenshots, 8 oscilloscope PWM waveforms (RigolDS12–RigolDS20), 5 Calman colour calibration plots, and 12 device photos correctly separated from 4 hardware angle shots — all from a single endpoint call.
 
+</details>
+
 ---
 
 ## API Reference
@@ -330,6 +369,9 @@ Deep SoC data including CPU core clusters, clocks, GPU, NPU, connectivity, proce
 ```bash
 GET /api/processor?q=snapdragon+8+elite
 ```
+
+<details>
+<summary><strong>▶ Expand full Snapdragon 8 Elite JSON response</strong></summary>
 
 ```json
 {
@@ -494,6 +536,8 @@ GET /api/processor?q=snapdragon+8+elite
 
 > The full response includes 20+ benchmark entries across `cpu`, `gpu`, `memory`, and `misc` categories — each with `percentile`, `minValue`, `maxValue`, and a full `deviceScores` array listing every NBC-tested device that uses this chip with its individual score. The snippet above is abbreviated; `devicesUsing` in the real response links directly to the NBC review URL for each device.
 
+</details>
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/processor?q=<chip>` | Full processor data by name |
@@ -617,13 +661,44 @@ curl https://YOUR-DEPLOYMENT.vercel.app/api/index/status
 
 ### Browser Dashboards
 
-The API ships three self-contained HTML dashboards for index management — no external tools needed.
+The API ships three self-contained HTML dashboards for index management — no external tools needed. Each dashboard is a live, reactive UI with real-time progress bars, status indicators, and one-click pipeline controls.
+
+![Dashboard UI Preview](./docs/dashboard-preview.png)
+> *`/migrate` dashboard — live batch migration progress with per-URL status, error counts, and auto-resume. Add `docs/dashboard-preview.png` to your repo to render this screenshot.*
 
 | Route | Description |
 |-------|-------------|
 | `/migrate` | Self-running batch migration: library URLs → review URLs, with live progress bars |
 | `/recover` | Re-crawls all chronological pages, resolves library URLs, purges duplicates in sequence |
 | `/recrawl` | Full reset pipeline: flush Redis → crawl Source A → crawl Source B → purge dupes → rebuild index |
+
+---
+
+### Error Schema
+
+Every failure state returns a consistent envelope so you can handle errors without parsing error messages.
+
+```json
+{
+  "success": false,
+  "error": "Device not found",
+  "code": "NOT_FOUND",
+  "query": "vivo x999 ultra",
+  "source": null,
+  "durationMs": 142
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `false` | Always `false` on error — your primary branch condition |
+| `error` | `string` | Human-readable error message |
+| `code` | `string` | Machine-readable error code (`NOT_FOUND`, `SCRAPE_FAILED`, `RATE_LIMITED`, `INVALID_QUERY`) |
+| `query` | `string \| null` | The original query string, if one was provided |
+| `source` | `null` | Always `null` on error |
+| `durationMs` | `number` | Total request time in milliseconds, useful for timeout debugging |
+
+> HTTP status codes map predictably: `400` for invalid/missing parameters, `404` for device not found, `429` for upstream proxy quota exhaustion, `500` for scraper or parse failures.
 
 ---
 
