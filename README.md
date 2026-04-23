@@ -12,7 +12,7 @@
 [![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express)](https://expressjs.com/)
 [![Vercel](https://img.shields.io/badge/Deploy%20on-Vercel-black?logo=vercel)](https://vercel.com/)
 [![Redis](https://img.shields.io/badge/Redis-Upstash-DC382D?logo=redis&logoColor=white)](https://upstash.com/)
-[![CI](https://img.shields.io/github/actions/workflow/status/Sanjeevu-Tarun/notebookchecker/ci.yml?label=CI&logo=github)](../../actions)
+
 
 <br/>
 
