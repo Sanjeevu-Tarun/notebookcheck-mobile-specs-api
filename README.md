@@ -2,7 +2,7 @@
 
 ![NotebookCheck Scraper API](https://placehold.co/1280x320/0d1117/00d4ff?text=NotebookCheck+Scraper+API&font=roboto)
 
-# 📓 NotebookCheck Scraper API
+
 
 ### The only open-source API that turns NotebookCheck reviews into structured JSON — with Cloudflare bypass, 7-bucket image classification, full benchmarks, and a 4,000+ device crawl index.
 
