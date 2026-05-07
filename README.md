@@ -4,7 +4,7 @@
 
 
 
-### The only open-source API that turns NotebookCheck reviews into structured JSON — with Cloudflare bypass, 7-bucket image classification, full benchmarks, and a 4,000+ device crawl index.
+### The only open-source API that turns NotebookCheck reviews into structured JSON — with Cloudflare bypass, 7-bucket image classification, full benchmarks, a 4,000+ device crawl index and returns instantly
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
