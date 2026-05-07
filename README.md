@@ -1,6 +1,6 @@
 <div align="center">
 
-![NotebookCheck Scraper API](https://placehold.co/1280x320/0d1117/00d4ff?text=NotebookCheck+Scraper+API&font=roboto)
+![NotebookCheck Mobile Specs Api](https://placehold.co/1280x320/0d1117/00d4ff?text=NotebookCheck+Scraper+API&font=roboto)
 
 
 
