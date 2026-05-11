@@ -63,7 +63,7 @@ The problem: NotebookCheck sits behind Cloudflare WAF, serves everything as HTML
 
 1. **Cloudflare bypass** — datacenter IPs get 403'd. The API ships a 5-layer cascade that automatically fails over through ScraperAPI → Scrape.do → WebScrapingAPI → ZenRows → FlareSolverr with zero downtime.
 2. **Image classification** — NBC review pages mix product shots, angle shots, camera samples, screenshots, benchmark charts, oscilloscope traces, and Calman plots in a single undifferentiated image pool. The API sorts them into 7 typed buckets using a multi-pass filename/caption/section-context classifier with 9 named fixes for real-world edge cases.
-3. **Scale** — scraping live on every request doesn't work. The API maintains a Redis-backed crawl index of 4,000+ device review URLs across three independent NBC listing sources, so most requests resolve from index in milliseconds without a live scrape.
+3. **Scale** — scraping live on every request doesn't work. The API maintains a Redis-backed crawl index of 4,000+ device review URLs across three independent NBC listing sources, so most requests resolve from index in milliseconds without a live scrape reducing overall burden of hitting the website for every new request.
 
 <div align="right"><a href="#table-of-contents">↑ back to top</a></div>
 
