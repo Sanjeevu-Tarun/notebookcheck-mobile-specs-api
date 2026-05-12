@@ -871,7 +871,7 @@ Have an idea? [Open a feature request](../../issues).
 
 ## ⚠️ Disclaimer
 
-This project scrapes publicly accessible pages for personal and educational use. It is not affiliated with, endorsed by, or connected to NotebookCheck or GSMArena in any way. Use responsibly, respect their Terms of Service, and do not use this API to build products that commercially reproduce their content at scale.
+This project scrapes publicly accessible pages for personal and educational use. It is not affiliated with, endorsed by, or connected to NotebookCheck or GSMArena in any way. Use responsibly, respect their Terms of Service, and do not use this API to build products that commercially reproduce their content at scale. Use it Fairly
 
 ---
 
