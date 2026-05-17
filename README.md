@@ -878,5 +878,6 @@ This project scrapes publicly accessible pages for personal and educational use.
 ## License
 
 [MIT](./LICENSE) © 2026 — Made with ❤️ by [Sanjeevu-Tarun](https://github.com/Sanjeevu-Tarun)
+Any issues or improvement suggestions are welcomed.
 
 <!-- SEO: NotebookCheck API, NotebookCheck scraper, GSMArena API, phone review API, smartphone benchmark API, Cloudflare bypass scraper, image classification API, camera sample scraper, SoC scraper, processor data API, phone specs API, mobile review scraper, TypeScript scraper API, Vercel serverless API, Upstash Redis cache, NBC review scraper, benchmark extraction API, display calibration API, PWM measurement API, Calman plot API -->
